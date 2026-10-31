@@ -1,0 +1,16 @@
+.room-set-badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;background:#e9f3fa;color:#215b81;font-size:11px;font-style:normal;font-weight:800}
+.room-set-main-label{display:block;margin:8px 0 5px;color:#667085;font-size:11px;font-weight:800;letter-spacing:.04em}
+.room-set-expand{margin:10px 0;border:1px solid #d9e6ef;border-radius:10px;background:#f7fbfe}
+.room-set-expand>summary{padding:10px 12px;color:#255b79;font-size:13px;font-weight:800;cursor:pointer}
+.room-set-expand>summary b{margin-left:5px;color:#a81039}
+.room-set-expand>.room-set-list{margin:0;padding:0 10px 10px}
+.room-set-expand>.room-set-list h4{display:none}
+.calendar-operation-booking .calendar-set-marker{color:#8b1234;font-size:11px;font-weight:900}
+.calendar-set-details{margin:8px 0;padding:9px 10px;border:1px solid #d1e1ed;border-radius:9px;background:#f7fbff}
+.calendar-set-details summary{color:#245a7a;font-size:13px;font-weight:800;cursor:pointer}
+.calendar-set-details p{margin:8px 0!important;font-size:12px!important;color:#667085}
+.calendar-set-details ul{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+.calendar-set-details li{display:grid;gap:2px;padding:7px;border-radius:7px;background:white;font-size:12px}
+.calendar-set-details li.current{outline:2px solid #6aa5c6}
+.calendar-set-details li span{color:#667085}
+.calendar-set-open{margin:6px 0 10px;padding:6px 9px;border:1px solid #d4dfe8;border-radius:8px;background:white;color:#245a7a;font-size:12px;font-weight:700;cursor:pointer}

@@ -1,0 +1,132 @@
+"""Room availability calculation, presentation and equipment normalization."""
+import re
+from collections import defaultdict
+
+from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import Session, joinedload
+
+from ..models import Booking, Room
+from ..equipment import equipment_items
+from ..schemas import AvailabilityRequest
+from ..serializers import room_to_dict
+from .bookings import BLOCKING_STATUSES, capacity_limit
+
+
+EQUIPMENT_PATTERNS = (
+    (r"видеостен|\bled\b", "видеостена"),
+    (r"колонк|акустическ|звукоусил", "колонки"),
+    (r"компьютер|ноутбук|моноблок|\bmac\b|\bпк\b", "компьютер"),
+    (r"проектор", "проектор"),
+    (r"микрофон", "микрофон"),
+    (r"видеокамер|(?<!контент-)(?<!контент )камера", "видеокамера"),
+    (r"видеосвяз|вкс|polycom", "видеосвязь"),
+    (r"телевизор|монитор|\bтв\b", "монитор или телевизор"),
+    (r"принтер|мфу", "принтер или МФУ"),
+    (r"интерактивн.*доск", "интерактивная доска"),
+    (r"маркерн.*доск", "маркерная доска"),
+    (r"флипчарт", "флипчарт"),
+    (r"конгресс", "конгресс-система"),
+    (r"синхронн.*перевод", "система синхронного перевода"),
+    (r"светов", "световое оборудование"),
+    (r"контент.?камер", "контент-камера"),
+)
+
+
+def equipment_categories(value: str) -> set[str]:
+    result: set[str] = set()
+    for raw in equipment_items(value):
+        normalized = raw.casefold()
+        for pattern, category in EQUIPMENT_PATTERNS:
+            if re.search(pattern, normalized):
+                result.add(category)
+    return result
+
+
+def availability_room(room: Room, conflict: Booking | None, nearest: Booking | None) -> dict:
+    data = room_to_dict(room)
+    data["available"] = conflict is None
+    data["conflict"] = None if conflict is None else {
+        "booking_id": conflict.id,
+        "title": conflict.title,
+        "time_start": conflict.time_start.strftime("%H:%M"),
+        "time_end": conflict.time_end.strftime("%H:%M"),
+        "customer": conflict.customer_name or conflict.booked_by,
+    }
+    data["nearest_booking"] = None if nearest is None else {
+        "time_start": nearest.time_start.strftime("%H:%M"),
+        "time_end": nearest.time_end.strftime("%H:%M"),
+        "title": nearest.title,
+    }
+    return data
+
+
+def build_availability(db: Session, payload: AvailabilityRequest) -> dict:
+    """Calculate availability with a constant number of database queries.
+
+    The previous endpoint queried conflicts and nearest bookings separately for
+    every room. This implementation loads rooms once and all relevant bookings
+    once, then performs the grouping in memory.
+    """
+    rooms = list(db.scalars(select(Room).options(joinedload(Room.building)).where(
+        Room.is_active,
+    ).order_by(Room.building_id, Room.number)))
+    if not rooms:
+        return {"free": [], "occupied": [], "alternatives": [],
+                "summary": {"free": 0, "occupied": 0, "alternatives": 0}}
+
+    overlap = and_(Booking.time_start < payload.time_end, Booking.time_end > payload.time_start)
+    visibility = or_(
+        Booking.status.in_(BLOCKING_STATUSES),
+        and_(Booking.status == "pending", overlap),
+    )
+    stmt = select(Booking).where(
+        Booking.room_id.in_([room.id for room in rooms]),
+        Booking.date == payload.date,
+        visibility,
+    ).order_by(Booking.room_id, Booking.time_start, Booking.created_at)
+    if payload.exclude_booking_id:
+        stmt = stmt.where(Booking.id != payload.exclude_booking_id)
+    records_by_room: dict[int, list[Booking]] = defaultdict(list)
+    for booking in db.scalars(stmt):
+        records_by_room[booking.room_id].append(booking)
+
+    requested_equipment = {item.casefold() for item in payload.equipment}
+    free, occupied, alternatives = [], [], []
+    for room in rooms:
+        records = records_by_room[room.id]
+        approved = [item for item in records if item.status in BLOCKING_STATUSES]
+        conflict = next((item for item in approved if item.time_start < payload.time_end and item.time_end > payload.time_start), None)
+        # The booking closest to the requested window: the next one after it, otherwise the last one before it.
+        nearest = next((item for item in approved if item.time_start >= payload.time_end), None) or next(
+            (item for item in reversed(approved) if item.time_end <= payload.time_start), None)
+        pending = [item for item in records if item.status == "pending"]
+        room_equipment = {category.casefold() for category in equipment_categories(room.equipment)}
+        fits_capacity = capacity_limit(room) >= payload.participants
+        fits_building = not payload.building_id or room.building_id == payload.building_id
+        fits_equipment = requested_equipment.issubset(room_equipment)
+        item = availability_room(room, conflict, nearest)
+        # Fits only with extra seating: still offered, but the administrator should see it.
+        item["over_capacity"] = payload.participants > room.capacity
+        item["pending_requests"] = [{
+            "id": request.id,
+            "title": request.title,
+            "time_start": request.time_start.strftime("%H:%M"),
+            "time_end": request.time_end.strftime("%H:%M"),
+            "customer": request.customer_name or request.booked_by,
+            "hold_expires_at": request.hold_expires_at.isoformat() if request.hold_expires_at else None,
+        } for request in pending]
+        if fits_capacity and fits_building and fits_equipment:
+            (free if conflict is None else occupied).append(item)
+        elif conflict is None and fits_capacity:
+            item["match_score"] = int(fits_building) * 3 + int(fits_equipment)
+            differences = [text for fits, text in ((fits_building, "другой корпус"),
+                                                   (fits_equipment, "нет части оснащения")) if not fits]
+            item["alternative_reason"] = "Свободна в нужное время; " + ", ".join(differences)
+            alternatives.append(item)
+    alternatives.sort(key=lambda item: (-item["match_score"], item["capacity"], item["building_id"], item["number"]))
+    return {
+        "free": free,
+        "occupied": occupied,
+        "alternatives": alternatives[:20],
+        "summary": {"free": len(free), "occupied": len(occupied), "alternatives": len(alternatives)},
+    }

@@ -1,0 +1,110 @@
+from .models import Booking, Room
+from .equipment import equipment_items
+
+
+def room_to_dict(room: Room) -> dict:
+    return {
+        "id": room.id, "number": room.number, "name": room.name,
+        "building_id": room.building_id, "building": room.building.name,
+        "building_image": room.building.image, "floor": room.floor, "floor_display": room.floor_display,
+        "capacity": room.capacity, "max_capacity": getattr(room, "max_capacity", None), "area": room.area, "type": room.type,
+        "equipment": equipment_items(room.equipment),
+        "description": room.description, "usage_options": room.usage_options or [],
+        "images": room.images or [], "floor_plan": room.floor_plan, "color": room.building.color,
+    }
+
+
+def booking_to_dict(item: Booking, include_events: bool = False) -> dict:
+    result = {
+        "id": item.id, "room_id": item.room_id, "room_number": item.room.number,
+        "room_name": item.room.name, "building": item.room.building.name,
+        "building_id": item.room.building_id,
+        "date": item.date.isoformat(), "time_start": item.time_start.strftime("%H:%M"),
+        "time_end": item.time_end.strftime("%H:%M"), "title": item.title,
+        "type": item.booking_type, "booking_type": item.booking_type, "group_name": item.group_name,
+        "teacher": item.teacher, "booked_by": item.booked_by,
+        "status": item.status, "color": item.room.building.color, "owner_id": item.owner_id,
+        "comment": item.comment, "requested_equipment": item.requested_equipment or [],
+        "catering_required": item.catering_required,
+        "source": item.source, "customer_name": item.customer_name or item.booked_by,
+        "customer_contact": item.customer_contact if item.source == "phone" else (item.customer_contact or item.email),
+        "participants": item.participants,
+        "department_id": item.department_id,
+        "department_code": item.department.code if item.department else None,
+        "department_name": item.department.name if item.department else None,
+        "external_channel": item.external_channel,
+        "external_reference": item.external_reference,
+        "external_url": item.external_url,
+        "series_id": item.series_id,
+        "previous_booking_id": item.previous_booking_id,
+        "parent_booking_id": item.parent_booking_id,
+        "room_purpose": item.room_purpose,
+        "transfer_reason": item.transfer_reason,
+        "record_kind": item.record_kind,
+        "hold_expires_at": item.hold_expires_at.isoformat() if item.hold_expires_at else None,
+        "owner_name": item.owner.full_name if item.owner else item.booked_by,
+        "owner_email": item.owner.email if item.owner else item.email,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "cancelled_at": item.cancelled_at.isoformat() if item.cancelled_at else None,
+        "cancelled_by": item.cancelled_by.full_name if item.cancelled_by else None,
+        "cancellation_reason": item.cancellation_reason,
+        "cancellation_comment": item.cancellation_comment,
+        "replacement_offered": item.replacement_offered,
+        "notify_customer": item.notify_customer,
+        "archived_at": item.archived_at.isoformat() if item.archived_at else None,
+        "archived_by": item.archived_by.full_name if item.archived_by else None,
+        "decision_at": item.decision_at.isoformat() if item.decision_at else None,
+        "decided_by": item.decided_by.full_name if item.decided_by else None,
+        "decision_reason": item.decision_reason,
+    }
+    if include_events:
+        result["events"] = [{
+            "id": event.id, "type": event.event_type, "summary": event.summary,
+            "data": event.data or {}, "actor": "Система" if (event.data or {}).get("system") else (event.actor.full_name if event.actor else "Система"),
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+        } for event in item.events]
+        result["comments"] = [{
+            "id": comment.id, "text": comment.text,
+            "author": comment.author.full_name,
+            "created_at": comment.created_at.isoformat() if comment.created_at else None,
+            "resolved_at": comment.resolved_at.isoformat() if comment.resolved_at else None,
+            "resolved_by": comment.resolved_by.full_name if comment.resolved_by else None,
+        } for comment in item.comments]
+    return result
+
+
+def calendar_booking_to_dict(item: Booking, *, include_private: bool = False) -> dict:
+    """Return only the data needed to render room occupancy in a calendar.
+
+    The shared calendar includes the operational contact details needed by
+    authenticated staff, but omits comments and other internal workflow data.
+    Administrators may receive the regular full payload.
+    """
+    if include_private:
+        return booking_to_dict(item)
+    return {
+        "id": item.id,
+        "room_id": item.room_id,
+        "room_number": item.room.number,
+        "room_name": item.room.name,
+        "building": item.room.building.name,
+        "building_id": item.room.building_id,
+        "date": item.date.isoformat(),
+        "time_start": item.time_start.strftime("%H:%M"),
+        "time_end": item.time_end.strftime("%H:%M"),
+        "title": item.title,
+        "booking_type": item.booking_type,
+        "record_kind": item.record_kind,
+        "status": item.status,
+        "owner_id": getattr(item, "owner_id", None),
+        "color": item.room.building.color,
+        "booked_by": item.booked_by,
+        "owner_name": item.owner.full_name if item.owner else item.booked_by,
+        "customer_contact": item.customer_contact or item.email,
+        "department_code": item.department.code if item.department else None,
+        "department_name": item.department.name if item.department else None,
+        "parent_booking_id": getattr(item, "parent_booking_id", None),
+        "room_purpose": getattr(item, "room_purpose", None),
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }

@@ -1,0 +1,73 @@
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+def load_local_environment() -> None:
+    """Load persistent local settings without overriding real environment variables."""
+    backend_dir = Path(__file__).resolve().parents[1]
+    for path in (backend_dir / ".env", backend_dir.parent / ".env"):
+        if not path.is_file():
+            continue
+        for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if value[:1] == value[-1:] and value[:1] in {'"', "'"}:
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+        break
+
+
+load_local_environment()
+
+
+@dataclass(frozen=True)
+class Settings:
+    database_url: str
+    secret_key: str
+    cookie_secure: bool
+    allowed_origins: tuple[str, ...]
+    seed_demo_data: bool
+    work_hours_start: int = 8
+    work_hours_end: int = 22
+    slot_minutes: int = 30
+    min_booking_minutes: int = 30
+    max_booking_minutes: int = 840
+    timezone: str = "Europe/Moscow"
+    allowed_email_domains: tuple[str, ...] = ()
+    lifecycle_worker_enabled: bool = True
+    lifecycle_interval_seconds: int = 30
+
+
+def get_settings() -> Settings:
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required")
+    secret_key = os.getenv("SECRET_KEY")
+    if not secret_key or len(secret_key) < 32:
+        raise RuntimeError("SECRET_KEY with at least 32 characters is required")
+    lifecycle_interval = int(os.getenv("LIFECYCLE_INTERVAL_SECONDS", "30"))
+    if not 1 <= lifecycle_interval <= 3600:
+        raise RuntimeError("LIFECYCLE_INTERVAL_SECONDS must be between 1 and 3600")
+    return Settings(
+        database_url=database_url,
+        lifecycle_worker_enabled=os.getenv("LIFECYCLE_WORKER_ENABLED", "true").lower() == "true",
+        lifecycle_interval_seconds=lifecycle_interval,
+        secret_key=secret_key,
+        cookie_secure=os.getenv("COOKIE_SECURE", "true").lower() == "true",
+        allowed_origins=tuple(x.strip() for x in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if x.strip()),
+        seed_demo_data=os.getenv("SEED_DEMO_DATA", "false").lower() == "true",
+        work_hours_start=int(os.getenv("WORK_HOURS_START", "8")),
+        work_hours_end=int(os.getenv("WORK_HOURS_END", "22")),
+        slot_minutes=int(os.getenv("TIME_SLOT_MINUTES", "30")),
+        min_booking_minutes=int(os.getenv("MIN_BOOKING_MINUTES", "30")),
+        max_booking_minutes=int(os.getenv("MAX_BOOKING_MINUTES", "840")),
+        timezone=os.getenv("APP_TIMEZONE", "Europe/Moscow"),
+        allowed_email_domains=tuple(x.strip().lower().lstrip("@") for x in os.getenv("ALLOWED_EMAIL_DOMAINS", "").split(",") if x.strip()),
+    )
+
+
+settings = get_settings()

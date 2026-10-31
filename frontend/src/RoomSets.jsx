@@ -1,0 +1,260 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Building2, Clock3, Plus, Trash2 } from "lucide-react";
+import "./roomSets.css";
+import AdminExtraRoomsPicker from "./AdminExtraRoomsPicker";
+import ExtraRoomsGuide from "./ExtraRoomsGuide";
+
+const FREE_ROOMS_TTL_MS = 60000;
+
+// Typical purposes of an extra room; "Другое" lets the person type their own.
+export const EXTRA_ROOM_PURPOSES = ["Штаб", "Хранение вещей", "Гардероб", "Зона питания", "Переговорная", "Зона регистрации"];
+export const MAX_EXTRA_ROOMS = 10;
+const OTHER = "__other";
+const TIMES = Array.from({ length: 29 }, (_, index) => {
+  const minutes = 8 * 60 + index * 30;
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+});
+const STATUS_LABELS = {
+  pending: "На согласовании",
+  approved: "Подтверждено",
+  rejected: "Отклонено",
+  cancelled: "Отменено",
+  cancelled_by_user: "Отменено",
+  cancelled_by_admin: "Отменено администратором",
+  completed: "Состоялось",
+  no_show: "Неявка",
+  transferred: "Перенесено",
+};
+export const OPEN_SET_STATUSES = ["pending", "approved"];
+
+const purposeOf = (row) => (row.purpose === OTHER ? row.purpose_other : row.purpose || "").trim();
+const rowTimes = (row, start, end) => [row.time_start || start, row.time_end || end];
+
+export const extraRoomsReady = (rows) => rows.every((row) => row.room_id && purposeOf(row).length >= 2);
+export const extraRoomsPayload = (rows) =>
+  rows.map((row) => ({
+    room_id: Number(row.room_id),
+    purpose: purposeOf(row),
+    time_start: row.time_start || null,
+    time_end: row.time_end || null,
+  }));
+
+// Moves the extra rooms of a set into their main booking (as `set_extras`) and drops them from the list,
+// so a set shows up as one card. Extra rooms whose main booking is not in the list stay as they are.
+export function attachRoomSets(items) {
+  const ids = new Set(items.map((item) => item.id));
+  const extras = new Map();
+  for (const item of items)
+    if (item.parent_booking_id && ids.has(item.parent_booking_id)) {
+      if (!extras.has(item.parent_booking_id)) extras.set(item.parent_booking_id, []);
+      extras.get(item.parent_booking_id).push(item);
+    }
+  return items
+    .filter((item) => !(item.parent_booking_id && ids.has(item.parent_booking_id)))
+    .map((item) => (extras.has(item.id) ? { ...item, set_extras: extras.get(item.id) } : item));
+}
+
+// Form block "Дополнительные аудитории": shown after the main room is chosen.
+export function ExtraRoomsPicker(props) {
+  return props.variant === "list"
+    ? <LegacyExtraRoomsPicker {...props}/>
+    : <AdminExtraRoomsPicker {...props} purposes={EXTRA_ROOM_PURPOSES} times={TIMES} maxRooms={MAX_EXTRA_ROOMS}/>;
+}
+
+function LegacyExtraRoomsPicker({ request, availabilityUrl, date, timeStart, timeEnd, mainRoomId, value, onChange, attempted }) {
+  const [free, setFree] = useState({});
+  // Free rooms change while the form is open: re-check a time window after a minute,
+  // and retry one whose request failed instead of showing "nothing free" for good.
+  const fetchedAt = useRef({});
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((value) => value + 1), FREE_ROOMS_TTL_MS);
+    return () => clearInterval(timer);
+  }, []);
+  const sectionRef = useRef(null);
+  const rowCount = useRef(value.length);
+  // A new row slides into view, so it is clear where to fill in the added room.
+  useEffect(() => {
+    if (value.length > rowCount.current) {
+      const rows = sectionRef.current?.querySelectorAll(".extra-room-row");
+      const row = rows?.[rows.length - 1];
+      row?.classList.add("just-added");
+      row?.scrollIntoView({ behavior: "smooth", block: "center" });
+      row?.querySelector("select")?.focus({ preventScroll: true });
+    }
+    rowCount.current = value.length;
+  }, [value.length]);
+  const ready = Boolean(date && timeStart && timeEnd && timeStart < timeEnd && mainRoomId);
+  const keys = useMemo(
+    () => [...new Set(value.map((row) => rowTimes(row, timeStart, timeEnd).join("-")))],
+    [value, timeStart, timeEnd],
+  );
+  useEffect(() => {
+    if (!ready) return;
+    let active = true;
+    for (const key of keys) {
+      const cacheKey = `${date}|${key}`;
+      if (free[cacheKey] && Date.now() - (fetchedAt.current[cacheKey] || 0) < FREE_ROOMS_TTL_MS) continue;
+      const [start, end] = key.split("-");
+      if (!(start < end)) continue;
+      request(availabilityUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, time_start: start, time_end: end, participants: 1, equipment: [] }),
+      })
+        .then((result) => {
+          if (!active) return;
+          fetchedAt.current[cacheKey] = Date.now();
+          setFree((current) => ({ ...current, [cacheKey]: result.free || [] }));
+        })
+        .catch(() => {
+          if (!active) return;
+          fetchedAt.current[cacheKey] = 0;
+          setFree((current) => ({ ...current, [cacheKey]: [] }));
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [ready, date, keys.join("|"), tick]);
+  const change = (index, patch) => onChange(value.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  const add = () => onChange([...value, { room_id: "", purpose: "", purpose_other: "", time_start: "", time_end: "" }]);
+  if (!ready) return null;
+  return (
+    <section className="extra-rooms" ref={sectionRef}>
+      <ExtraRoomsGuide request={request} count={value.length}/>
+      <div className="extra-rooms-head">
+        <div>
+          <b>Дополнительные аудитории</b>
+          <small>
+            Нужны ещё помещения к основной аудитории (штаб, хранение вещей и т. п.)? Добавьте их — всё уйдёт одной
+            заявкой.
+          </small>
+        </div>
+        <button type="button" className="secondary" onClick={add} disabled={value.length >= MAX_EXTRA_ROOMS}>
+          <Plus />
+          Добавить аудиторию
+        </button>
+      </div>
+      {value.map((row, index) => {
+        const [start, end] = rowTimes(row, timeStart, timeEnd);
+        const list = free[`${date}|${start}-${end}`];
+        const taken = new Set([String(mainRoomId), ...value.filter((_, i) => i !== index).map((other) => String(other.room_id))]);
+        const options = (list || []).filter((room) => !taken.has(String(room.id)));
+        const chosenMissing = row.room_id && list && !options.some((room) => String(room.id) === String(row.room_id));
+        return (
+          <div className="extra-room-row" key={index}>
+            <label className={row.room_id ? "complete" : attempted ? "invalid" : ""}>
+              <span>Аудитория *</span>
+              <select value={row.room_id} onChange={(event) => change(index, { room_id: event.target.value })}>
+                <option value="">{list ? (options.length ? "Выберите свободную" : "Свободных нет") : "Загружаем…"}</option>
+                {chosenMissing && (
+                  <option value={row.room_id} disabled>
+                    Выбранная аудитория занята в это время
+                  </option>
+                )}
+                {options.map((room) => (
+                  <option value={room.id} key={room.id}>
+                    {room.number} · {room.building} · {room.capacity} мест
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className={purposeOf(row).length >= 2 ? "complete" : attempted ? "invalid" : ""}>
+              <span>Назначение *</span>
+              <select value={row.purpose} onChange={(event) => change(index, { purpose: event.target.value })}>
+                <option value="">Выберите</option>
+                {EXTRA_ROOM_PURPOSES.map((item) => (
+                  <option key={item}>{item}</option>
+                ))}
+                <option value={OTHER}>Другое…</option>
+              </select>
+              {row.purpose === OTHER && (
+                <input
+                  value={row.purpose_other}
+                  maxLength={120}
+                  onChange={(event) => change(index, { purpose_other: event.target.value })}
+                  placeholder="Для чего нужна аудитория"
+                />
+              )}
+            </label>
+            <label>
+              <span>Начало</span>
+              <select value={row.time_start} onChange={(event) => change(index, { time_start: event.target.value, room_id: "" })}>
+                <option value="">Как основная ({timeStart})</option>
+                {TIMES.map((time) => (
+                  <option key={time}>{time}</option>
+                ))}
+              </select>
+            </label>
+            <label className={start < end ? "" : "invalid"}>
+              <span>Окончание</span>
+              <select value={row.time_end} onChange={(event) => change(index, { time_end: event.target.value, room_id: "" })}>
+                <option value="">Как основная ({timeEnd})</option>
+                {TIMES.map((time) => (
+                  <option key={time}>{time}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="icon extra-room-remove"
+              aria-label="Убрать аудиторию"
+              title="Убрать"
+              onClick={() => onChange(value.filter((_, i) => i !== index))}
+            >
+              <Trash2 />
+            </button>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+// One equally prominent card per room, with the original booking status and actions.
+export function RoomSetCards({ main, extras = [], actions }) {
+  if (!extras.length) return null;
+  return <section className="room-set-cards" aria-label="Аудитории комплекта">
+    {[main,...extras].map((room,index)=><article key={room.id} className="room-set-equal-card" style={{'--set-room-color':room.color||'#c81340'}}>
+      <div className="room-set-equal-heading"><span>{index===0?'Основная':`Дополнительная · ${room.room_purpose||'назначение не указано'}`}</span><em className={`status ${room.status}`}>{STATUS_LABELS[room.status]||room.status}</em></div>
+      <div className="room-set-equal-building"><Building2/>Корпус: {room.building}</div>
+      <strong>Аудитория {room.room_number}</strong>
+      <div className="room-set-equal-time"><Clock3/>{room.time_start}–{room.time_end}{room.has_conflict&&' · занята в это время'}</div>
+      {index>0&&actions?.(room)}
+    </article>)}
+  </section>;
+}
+
+// Read-only list of the extra rooms in a card. `actions(extra)` may return buttons for one room.
+export function RoomSetList({ extras = [], title = "Дополнительные аудитории", actions, collapsible = false }) {
+  if (!extras.length) return null;
+  const content = (
+    <section className="room-set-list">
+      <h4>
+        <Building2 />
+        {title}
+        <b>{extras.length}</b>
+      </h4>
+      <ul>
+        {extras.map((extra) => (
+          <li key={extra.id} className={OPEN_SET_STATUSES.includes(extra.status) ? "" : "closed"} style={{"--set-room-color":extra.color||"#c81340"}}>
+            <span>
+              <small className="room-set-building"><Building2 />Корпус: {extra.building}</small>
+              <b>Аудитория {extra.room_number}</b>
+              <small className="room-set-purpose">Назначение: {extra.room_purpose || "не указано"}</small>
+              <small>
+                <Clock3 />
+                {extra.time_start}–{extra.time_end}
+                {extra.has_conflict ? " · занята в это время" : ""}
+              </small>
+            </span>
+            <em className={`status ${extra.status}`}>{STATUS_LABELS[extra.status] || extra.status}</em>
+            {actions?.(extra)}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+  return collapsible ? <details className="room-set-expand" open><summary>Дополнительные аудитории <b>{extras.length}</b></summary>{content}</details> : content;
+}

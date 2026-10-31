@@ -1,0 +1,177 @@
+"""Safe, repeatable importer for the legacy VSHGU date-by-room workbook.
+
+The importer only writes rows whose room can be matched unambiguously. It keeps
+the source sheet/cell in external_reference and therefore skips duplicates on
+subsequent runs. Run without confirm first to review the counts.
+"""
+from collections import Counter
+from datetime import datetime, time
+import re
+from pathlib import Path
+
+from openpyxl import load_workbook
+from sqlalchemy import select
+
+from .database import SessionLocal
+from .models import Booking, BookingComment, BookingEvent, Department, Room, User
+from .services.bookings import find_conflict
+from .timeutils import _ZONE
+
+STATUS_KIND = {"ремонт": "maintenance", "застройка": "setup", "демонтаж": "teardown"}
+STATUS_BOOKING = {"отмена": "cancelled_by_admin", "перенос": "transferred", "отказ": "rejected"}
+
+
+def _clean(value) -> str:
+    return " ".join(str(value or "").replace("\xa0", " ").strip().split())
+
+
+_RANGE_FULL = re.compile(r"(?<!\d)(\d{1,2})([:.\-])(\d{2})\s*(?:-|–|—|до)\s*(\d{1,2})([:.\-])(\d{2})(?!\d)", re.I)
+_RANGE_SHORT = re.compile(r"(?:с\s*)?(?<!\d)(\d{1,2})([:.\-])(\d{2})\s*(?:до|-|–|—)\s*(\d{1,2})(?:([:.\-])(\d{2}))?(?!\d)", re.I)
+
+
+def _clock(hours: str, separator: str | None, minutes: str | None) -> time | None:
+    """A wall-clock value or None when the text is not a time (for example a date "30.10")."""
+    hour, minute = int(hours), int(minutes or 0)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    # "10.10" is far more often a date than ten past ten; accept a dot only on quarter hours.
+    if separator == "." and minute not in (0, 15, 30, 45):
+        return None
+    return time(hour, minute)
+
+
+def _time_window(comment: str | None) -> tuple[time, time]:
+    text = comment or ""
+    for pattern in (_RANGE_FULL, _RANGE_SHORT):
+        for match in pattern.finditer(text):
+            start = _clock(match.group(1), match.group(2), match.group(3))
+            end = _clock(match.group(4), match.group(5), match.group(6))
+            if start and end and start < end:
+                return start, end
+    return time(8, 0), time(22, 0)
+
+
+def _room_lookup(rooms: list[Room], number: str, building_hint: str) -> Room | None:
+    normalized = number.casefold().replace(" ", "")
+    candidates = [room for room in rooms if room.number.casefold().replace(" ", "") == normalized]
+    if len(candidates) == 1: return candidates[0]
+    hint = building_hint.casefold()
+    words = {"1": "перв", "2": "втор", "5": "пят"}
+    for digit, word in words.items():
+        if digit in hint:
+            narrowed = [room for room in candidates if word in room.building.name.casefold()]
+            if len(narrowed) == 1: return narrowed[0]
+    if "пречист" in hint:
+        narrowed = [room for room in candidates if "пречист" in room.building.name.casefold()]
+        if len(narrowed) == 1: return narrowed[0]
+    return None
+
+
+def import_excel(path: str, admin_email: str, confirm: bool = False) -> dict:
+    workbook = load_workbook(Path(path), data_only=True, read_only=False)
+    stats = Counter()
+    with SessionLocal() as db:
+        actor = db.scalar(select(User).where(User.email == admin_email.lower(), User.role == "admin"))
+        if not actor: raise ValueError("Администратор с таким email не найден")
+        rooms = list(db.scalars(select(Room).where(Room.is_active)))
+        department_cache: dict[str, Department] = {}
+        for item in db.scalars(select(Department)):
+            # Cells hold either a code or a full name, so both find the same department.
+            department_cache.setdefault(item.code.casefold(), item)
+            department_cache.setdefault(item.name.casefold(), item)
+        existing_refs = set(db.scalars(select(Booking.external_reference).where(Booking.source == "excel_import")))
+        unmatched_rooms: set[str] = set()
+        overlaps: list[str] = []
+        staged = []
+        # Approved records already planned in this run, per room and date: the database
+        # forbids two approved records on one room at the same time, and one bad pair
+        # used to fail the whole import at commit.
+        planned: dict[tuple[int, object], list[tuple[time, time, str]]] = {}
+        for sheet in workbook.worksheets:
+            header_row = next((row for row in range(1, min(sheet.max_row, 80) + 1)
+                               if _clean(sheet.cell(row, 1).value).casefold() == "дата/аудитория"), None)
+            if not header_row:
+                stats["sheets_without_header"] += 1; continue
+            room_row = header_row + 2
+            building_hint = ""
+            columns = []
+            for column in range(2, sheet.max_column + 1):
+                header = _clean(sheet.cell(header_row, column).value)
+                if header: building_hint = header
+                number = _clean(sheet.cell(room_row, column).value)
+                if not number: continue
+                room = _room_lookup(rooms, number, building_hint)
+                columns.append((column, room, number, building_hint))
+                if room is None:
+                    stats["unmatched_room_columns"] += 1
+                    unmatched_rooms.add(f"{building_hint}: {number}")
+            for row in range(room_row + 1, sheet.max_row + 1):
+                raw_date = sheet.cell(row, 1).value
+                if not isinstance(raw_date, datetime): continue
+                booking_date = raw_date.date()
+                for column, room, number, hint in columns:
+                    value = _clean(sheet.cell(row, column).value)
+                    if not value: continue
+                    stats["candidate_cells"] += 1
+                    if room is None:
+                        stats["skipped_unmatched_room"] += 1; continue
+                    reference = f"{sheet.title}!{sheet.cell(row, column).coordinate}"
+                    if reference in existing_refs:
+                        stats["skipped_existing"] += 1; continue
+                    normalized = value.casefold()
+                    comment = sheet.cell(row, column).comment.text if sheet.cell(row, column).comment else None
+                    start, end = _time_window(comment)
+                    record_kind = next((kind for word, kind in STATUS_KIND.items() if word in normalized), "booking")
+                    status = next((state for word, state in STATUS_BOOKING.items() if word in normalized), "approved")
+                    if status == "approved":
+                        clash = next((ref for other_start, other_end, ref in planned.get((room.id, booking_date), [])
+                                      if other_start < end and other_end > start), None)
+                        if clash is None:
+                            existing = find_conflict(db, room.id, booking_date, start, end)
+                            if existing:
+                                clash = f"бронирование #{existing.id}"
+                        if clash:
+                            stats["skipped_overlap"] += 1
+                            overlaps.append(f"{reference} ({start:%H:%M}–{end:%H:%M}, ауд. {room.number}) пересекается с {clash}")
+                            continue
+                        planned.setdefault((room.id, booking_date), []).append((start, end, reference))
+                    department = None
+                    if record_kind == "booking" and status == "approved":
+                        department = department_cache.get(normalized) or department_cache.get(value[:40].casefold())
+                        if not department:
+                            department = Department(code=value[:40], name=value[:250])
+                            department_cache[normalized] = department
+                            department_cache[value[:40].casefold()] = department
+                            if confirm: db.add(department); db.flush()
+                    title = value if record_kind == "booking" else {"maintenance":"Ремонт","setup":"Застройка","teardown":"Демонтаж"}[record_kind]
+                    staged.append((room, booking_date, start, end, title, status, record_kind, department, reference, comment))
+        stats["ready_to_import"] = len(staged)
+        if confirm:
+            for room, day, start, end, title, status, kind, department, reference, comment in staged:
+                item = Booking(room_id=room.id, owner_id=actor.id, date=day, time_start=start, time_end=end,
+                               title=title[:200], booking_type="legacy", booked_by=actor.full_name,
+                               email=actor.email, comment=comment, requested_equipment=[], source="excel_import",
+                               customer_name=department.name if department else "Исторический импорт",
+                               department_id=department.id if department else None, external_channel="excel",
+                               external_reference=reference, status=status, record_kind=kind)
+                if status == "cancelled_by_admin":
+                    item.cancellation_reason = "Отмена из исторического Excel"
+                    item.cancellation_comment = comment or title
+                    item.cancelled_by_id = actor.id
+                    item.cancelled_at = datetime.combine(day, start, tzinfo=_ZONE)
+                elif status == "rejected":
+                    item.decision_reason = comment or "Отказ из исторического Excel"
+                    item.decided_by_id = actor.id
+                    item.decision_at = datetime.combine(day, start, tzinfo=_ZONE)
+                elif status == "transferred":
+                    item.transfer_reason = comment or "Перенос из исторического Excel"
+                db.add(item); db.flush()
+                db.add(BookingEvent(booking_id=item.id, actor_id=actor.id, event_type="imported",
+                                    summary="Импортировано из исторического Excel", data={"source_cell": reference}))
+                if comment:
+                    db.add(BookingComment(booking_id=item.id, author_id=actor.id, text=comment[:2000]))
+            db.commit(); stats["imported"] = len(staged)
+    result = dict(stats)
+    result["unmatched_rooms"] = sorted(unmatched_rooms)[:50]
+    result["overlaps"] = overlaps[:50]
+    return result

@@ -1,0 +1,49 @@
+import argparse, getpass, json
+from sqlalchemy import select
+from .database import SessionLocal
+from .models import User
+from .security import hash_password
+from .catalog import replace_catalog
+from .excel_import import import_excel
+from .services.lifecycle_worker import run_lifecycle_once
+
+def create_admin(email: str, full_name: str):
+    password = getpass.getpass("Admin password: ")
+    if len(password) < 12: raise SystemExit("Password must contain at least 12 characters")
+    with SessionLocal() as db:
+        if db.scalar(select(User.id).where(User.email == email.lower())): raise SystemExit("User already exists")
+        db.add(User(email=email.lower(), full_name=full_name, password_hash=hash_password(password), role="admin")); db.commit()
+        print("Administrator created")
+
+def reset_password(email: str):
+    password = getpass.getpass("New password: ")
+    confirmation = getpass.getpass("Repeat new password: ")
+    if password != confirmation:
+        raise SystemExit("Passwords do not match")
+    if len(password) < 12:
+        raise SystemExit("Password must contain at least 12 characters")
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email.lower()))
+        if not user:
+            raise SystemExit("User not found")
+        user.password_hash = hash_password(password)
+        db.commit()
+        print(f"Password updated for {user.email}")
+if __name__ == "__main__":
+    parser=argparse.ArgumentParser(); sub=parser.add_subparsers(dest="command",required=True)
+    admin=sub.add_parser("create-admin"); admin.add_argument("--email",required=True); admin.add_argument("--name",required=True)
+    reset=sub.add_parser("reset-password"); reset.add_argument("--email",required=True)
+    catalog=sub.add_parser("replace-catalog"); catalog.add_argument("--confirm",action="store_true")
+    excel=sub.add_parser("import-excel"); excel.add_argument("--file",required=True); excel.add_argument("--admin-email",required=True); excel.add_argument("--confirm",action="store_true")
+    sub.add_parser("process-due-bookings", help="Run one automatic booking lifecycle cycle")
+    args=parser.parse_args()
+    if args.command == "create-admin": create_admin(args.email,args.name)
+    elif args.command == "reset-password": reset_password(args.email)
+    elif args.command == "process-due-bookings": print(json.dumps(run_lifecycle_once(), ensure_ascii=False))
+    elif args.command == "import-excel":
+        result=import_excel(args.file,args.admin_email,args.confirm)
+        print("Import complete" if args.confirm else "Preview only")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif not args.confirm: raise SystemExit("Use --confirm: this replaces buildings, rooms and existing bookings")
+    else:
+        buildings,rooms=replace_catalog(); print(f"Catalog replaced: {buildings} buildings, {rooms} rooms")

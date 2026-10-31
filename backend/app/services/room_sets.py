@@ -1,0 +1,170 @@
+"""Sets of rooms: a main booking plus extra rooms booked with it (staff room, storage, …).
+
+An extra room is a regular Booking with `parent_booking_id` pointing at the main
+one, so conflict checks, the calendar and moderation treat it like any other
+record. This module keeps the set consistent: it is created in one transaction,
+approved and rejected together, and cancelled or moved together with the main
+booking.
+"""
+from datetime import date, datetime
+
+from fastapi import HTTPException
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session, joinedload
+
+from ..timeutils import utc_now
+from ..models import Booking, Room, User
+from ..schemas import MAX_EXTRA_ROOMS, ExtraRoomRequest
+from .bookings import find_conflict, find_own_duplicate, record_event, reject_competing_requests, validate_booking_window, validate_booking_lead_time
+
+from .booking_locks import lock_booking_record
+
+OPEN_STATUSES = ("pending", "approved")
+
+
+def lock_room_day(db: Session, room_id: int, booking_date: date) -> None:
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": booking_date.toordinal() * 100000 + room_id})
+
+
+def extra_rooms_of(db: Session, main: Booking, *, open_only: bool = False) -> list[Booking]:
+    stmt = select(Booking).options(joinedload(Booking.room)).where(Booking.parent_booking_id == main.id)
+    if open_only:
+        stmt = stmt.where(Booking.status.in_(OPEN_STATUSES))
+    return list(db.scalars(stmt.order_by(Booking.time_start, Booking.id)))
+
+
+def _title(main: Booking, purpose: str) -> str:
+    return f"{main.title} — {purpose}"[:200]
+
+
+def create_extra_rooms(db: Session, main: Booking, extras: list[ExtraRoomRequest], actor: User,
+                       *, status: str | None = None) -> list[Booking]:
+    """Add extra rooms to `main` inside the caller's transaction (the caller commits).
+
+    Every room is checked like a regular booking; one problem cancels the whole
+    request, and the message names the room that is in the way.
+    """
+    if not extras:
+        return []
+    validate_booking_lead_time(main.date)
+    main = lock_booking_record(db, main)
+    if main.parent_booking_id:
+        raise HTTPException(409, "Дополнительную аудиторию можно добавить только к основной брони")
+    # A transferred booking gets its own series id, so only a real series (several records) is refused.
+    if main.series_id and db.scalar(select(func.count(Booking.id)).where(Booking.series_id == main.series_id)) > 1:
+        raise HTTPException(409, "Дополнительные аудитории для серий пока не поддерживаются")
+    if main.status not in OPEN_STATUSES:
+        raise HTTPException(409, "Бронирование уже закрыто")
+    existing = extra_rooms_of(db, main, open_only=True)
+    if len(existing) + len(extras) > MAX_EXTRA_ROOMS:
+        raise HTTPException(409, f"К одной брони можно добавить не более {MAX_EXTRA_ROOMS} дополнительных аудиторий")
+    taken = {main.room_id, *(item.room_id for item in existing)}
+    status = status or main.status
+    created = []
+    for extra in extras:
+        room = db.scalar(select(Room).where(Room.id == extra.room_id, Room.is_active))
+        if not room:
+            raise HTTPException(404, "Дополнительная аудитория не найдена")
+        if room.id in taken:
+            raise HTTPException(409, f"Аудитория {room.number} уже есть в этой брони")
+        taken.add(room.id)
+        start, end = extra.time_start or main.time_start, extra.time_end or main.time_end
+        validate_booking_window(main.date, start, end)
+        lock_room_day(db, room.id, main.date)
+        if find_conflict(db, room.id, main.date, start, end):
+            raise HTTPException(409, f"Аудитория {room.number} занята {start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
+                                     " — выберите другую или измените время")
+        if actor.role != "admin" and find_own_duplicate(db, main.owner_id, room.id, main.date, start, end):
+            raise HTTPException(409, f"У вас уже есть заявка на аудиторию {room.number} в это время")
+        item = Booking(
+            room_id=room.id, owner_id=main.owner_id, date=main.date, time_start=start, time_end=end,
+            title=_title(main, extra.purpose), booking_type=main.booking_type, booked_by=main.booked_by, email=main.email,
+            comment=None, requested_equipment=[], catering_required=main.catering_required, technical_support_required=main.technical_support_required, source=main.source,
+            created_at=main.created_at,
+            customer_name=main.customer_name, customer_contact=main.customer_contact, participants=None,
+            department_id=main.department_id, external_channel=main.external_channel,
+            external_reference=main.external_reference, external_url=main.external_url,
+            parent_booking_id=main.id, room_purpose=extra.purpose, record_kind="booking", status=status,
+            decision_at=utc_now() if status == "approved" else None,
+            decided_by_id=actor.id if status == "approved" and actor.role == "admin" else None,
+        )
+        db.add(item); db.flush()
+        record_event(db, item, actor, "created", f"Дополнительная аудитория к брони № {main.id}: {extra.purpose}",
+                     {"parent_booking_id": main.id, "room_id": room.id, "purpose": extra.purpose})
+        if status == "approved":
+            record_event(db, item, actor, "approved", "Бронирование подтверждено администратором",
+                         {"set_id": main.id})
+            reject_competing_requests(db, item, actor)
+        created.append(item)
+    return created
+
+
+def ensure_set_can_be_approved(db: Session, main: Booking) -> list[Booking]:
+    """Pending extra rooms that will be approved with `main`; a busy one blocks the whole set."""
+    extras = [item for item in extra_rooms_of(db, main) if item.status == "pending"]
+    busy = []
+    for item in extras:
+        lock_room_day(db, item.room_id, item.date)
+        if find_conflict(db, item.room_id, item.date, item.time_start, item.time_end, item.id):
+            busy.append(item)
+    if busy:
+        rooms = ", ".join(f"ауд. {item.room.number} ({item.room_purpose})" for item in busy)
+        raise HTTPException(409, f"Комплект нельзя подтвердить: уже заняты {rooms}. Снимите их из комплекта и повторите")
+    return extras
+
+
+def decide_extra_rooms(db: Session, extras: list[Booking], actor: User, status: str, reason: str | None, main: Booking) -> None:
+    """Apply the decision on the main booking to its pending extra rooms."""
+    now = utc_now()
+    for item in extras:
+        item.status = status
+        item.updated_at = now
+        item.decision_at = now
+        item.decided_by_id = actor.id
+        item.decision_reason = reason.strip() if reason else None
+        item.hold_expires_at = None
+        summary = "Бронирование подтверждено" if status == "approved" else "Заявка отклонена"
+        record_event(db, item, actor, status, summary, {"previous_status": "pending", "reason": reason, "set_id": main.id})
+    if status == "approved":
+        db.flush()
+        for item in extras:
+            reject_competing_requests(db, item, actor)
+
+
+def ensure_extra_can_be_approved_alone(db: Session, item: Booking) -> None:
+    if item.parent_booking_id:
+        main = db.get(Booking, item.parent_booking_id)
+        if main and main.status == "pending":
+            raise HTTPException(409, "Это дополнительная аудитория — подтвердите комплект через основную бронь")
+
+
+def move_extra_rooms(db: Session, extras: list[Booking], new_main: Booking, actor: User) -> None:
+    """Keep open extra rooms with the main booking after it is moved or transferred.
+
+    The extra rooms keep their own room and time; when the date changes they
+    move to the new date if the room is free there.
+    """
+    clash = [item for item in extras if item.room_id == new_main.room_id]
+    if clash:
+        raise HTTPException(409, f"Аудитория {clash[0].room.number} уже входит в комплект как дополнительная — "
+                                 "выберите другую аудиторию или снимите её из комплекта")
+    busy = []
+    for item in extras:
+        if item.date != new_main.date:
+            lock_room_day(db, item.room_id, new_main.date)
+            if find_conflict(db, item.room_id, new_main.date, item.time_start, item.time_end, item.id):
+                busy.append(item)
+    if busy:
+        rooms = ", ".join(f"ауд. {item.room.number}" for item in busy)
+        raise HTTPException(409, f"На новую дату заняты дополнительные аудитории комплекта: {rooms}. "
+                                 "Снимите их из комплекта или выберите другую дату")
+    for item in extras:
+        changed = item.date != new_main.date or item.parent_booking_id != new_main.id
+        if item.date != new_main.date:
+            validate_booking_window(new_main.date, item.time_start, item.time_end)
+            item.date = new_main.date
+        item.parent_booking_id = new_main.id
+        if changed:
+            item.updated_at = utc_now()
+            record_event(db, item, actor, "updated", "Дополнительная аудитория перенесена вместе с основной бронью",
+                         {"parent_booking_id": new_main.id, "date": new_main.date.isoformat()})

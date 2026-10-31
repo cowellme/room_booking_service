@@ -1,0 +1,179 @@
+from collections import defaultdict
+from datetime import timedelta
+import uuid
+
+from fastapi import HTTPException
+from sqlalchemy import select, text, func
+from sqlalchemy.orm import Session, joinedload
+
+from ..models import Booking, Department, Room, User
+from ..schemas import BatchBookingCreate, BookingTransferRequest, SeriesAvailabilityRequest, ServiceBlockCreate
+from .bookings import BLOCKING_STATUSES, check_capacity, find_conflict, record_event, validate_booking_window
+from .booking_lifecycle import ensure_booking_open
+
+
+def _dates(start, end, weekdays=None):
+    current = start
+    while current <= end:
+        if weekdays is None or current.weekday() in weekdays:
+            yield current
+        current += timedelta(days=1)
+
+
+def _lock(db: Session, room_id: int, booking_date) -> None:
+    key = booking_date.toordinal() * 100000 + room_id
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+def create_series(db: Session, payload: BatchBookingCreate, actor: User, *, status: str = "approved", source: str = "admin_batch") -> list[Booking]:
+    if not payload.department_id and payload.department_name:
+        department = db.scalar(select(Department).where(func.lower(Department.name) == payload.department_name.strip().lower()))
+        if not department:
+            department = Department(code="USER-" + uuid.uuid4().hex[:10].upper(), name=payload.department_name.strip(), is_active=True)
+            db.add(department); db.flush()
+        department.is_active = True
+        payload.department_id = department.id
+    if payload.department_id:
+        chosen = db.get(Department, payload.department_id)
+        if not chosen:
+            raise HTTPException(404, "Подразделение не найдено")
+        if actor.role != "admin":
+            actor.department = chosen.name
+    dates = list(_dates(payload.date, payload.date_end, set(payload.weekdays)))
+    if not dates:
+        raise HTTPException(400, "В выбранном периоде нет подходящих дней")
+    rooms = list(db.scalars(select(Room).options(joinedload(Room.building)).where(
+        Room.id.in_(payload.room_ids), Room.is_active,
+    )))
+    if len(rooms) != len(payload.room_ids):
+        raise HTTPException(404, "Одна или несколько аудиторий не найдены")
+    for room in rooms:
+        check_capacity(room, payload.participants)
+    for day in dates:
+        validate_booking_window(day, payload.time_start, payload.time_end)
+        for room in rooms:
+            _lock(db, room.id, day)
+            conflict = find_conflict(db, room.id, day, payload.time_start, payload.time_end)
+            if conflict:
+                raise HTTPException(409, f"Серия пересекается с существующей бронью: {day.strftime('%d.%m.%Y')}, аудитория {room.number}")
+    series_id = str(uuid.uuid4())
+    created = []
+    try:
+        for day in dates:
+            for room in rooms:
+                item = Booking(
+                    room_id=room.id, owner_id=actor.id, date=day,
+                    time_start=payload.time_start, time_end=payload.time_end,
+                    title=payload.title.strip(), booking_type=payload.booking_type,
+                    group_name=payload.group_name, teacher=payload.teacher,
+                    booked_by=actor.full_name, email=actor.email, comment=payload.comment,
+                    requested_equipment=payload.requested_equipment, participants=payload.participants,
+                    source=source, customer_name=payload.customer_name or actor.full_name,
+                    customer_contact=payload.customer_contact, department_id=payload.department_id,
+                    external_channel=payload.external_channel, external_reference=payload.external_reference,
+                    external_url=payload.external_url, series_id=series_id,
+                    status=status, record_kind="booking",
+                )
+                db.add(item); db.flush()
+                record_event(db, item, actor, "series_created", "Бронирование создано в серии", {"series_id": series_id})
+                created.append(item)
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+    return created
+
+
+def series_conflicts(db: Session, payload: SeriesAvailabilityRequest) -> dict:
+    """Dates of a planned series on which each room is already taken."""
+    dates = list(_dates(payload.date, payload.date_end, set(payload.weekdays)))
+    if not dates:
+        return {"dates": [], "busy": {}}
+    stmt = select(Booking.room_id, Booking.date).where(
+        Booking.date.in_(dates), Booking.status.in_(BLOCKING_STATUSES),
+        Booking.time_start < payload.time_end, Booking.time_end > payload.time_start,
+    )
+    if payload.room_ids:
+        stmt = stmt.where(Booking.room_id.in_(payload.room_ids))
+    busy: dict[str, set[str]] = defaultdict(set)
+    for room_id, day in db.execute(stmt):
+        busy[str(room_id)].add(day.isoformat())
+    return {"dates": [day.isoformat() for day in dates], "busy": {key: sorted(value) for key, value in busy.items()}}
+
+
+def transfer_booking(db: Session, original: Booking, payload: BookingTransferRequest, actor: User) -> Booking:
+    ensure_booking_open(original)
+    validate_booking_window(payload.date, payload.time_start, payload.time_end)
+    room = db.scalar(select(Room).options(joinedload(Room.building)).where(Room.id == payload.room_id, Room.is_active))
+    if not room:
+        raise HTTPException(404, "Аудитория не найдена")
+    check_capacity(room, payload.participants or original.participants)
+    if payload.department_id and not db.get(Department, payload.department_id):
+        raise HTTPException(404, "Подразделение не найдено")
+    _lock(db, room.id, payload.date)
+    conflict = find_conflict(db, room.id, payload.date, payload.time_start, payload.time_end, original.id)
+    if conflict:
+        raise HTTPException(409, "Новое время уже занято")
+    series_id = original.series_id or str(uuid.uuid4())
+    item = Booking(
+        room_id=room.id, owner_id=original.owner_id, date=payload.date,
+        time_start=payload.time_start, time_end=payload.time_end,
+        title=payload.title.strip(), booking_type=payload.booking_type,
+        group_name=payload.group_name, teacher=payload.teacher,
+        booked_by=original.booked_by, email=original.email,
+        comment=payload.comment, requested_equipment=payload.requested_equipment,
+        participants=payload.participants or original.participants,
+        source="transfer", customer_name=original.customer_name,
+        customer_contact=original.customer_contact, department_id=payload.department_id or original.department_id,
+        external_channel=payload.external_channel or original.external_channel,
+        external_reference=payload.external_reference or original.external_reference,
+        external_url=payload.external_url or original.external_url,
+        series_id=series_id, previous_booking_id=original.id,
+        transfer_reason=payload.reason.strip(), status="approved", record_kind="booking",
+    )
+    try:
+        db.add(item); db.flush()
+        original.status = "transferred"
+        original.transfer_reason = payload.reason.strip()
+        record_event(db, original, actor, "transferred", "Бронирование перенесено", {"new_booking_id": item.id, "reason": payload.reason, "notify_customer": payload.notify_customer})
+        record_event(db, item, actor, "created_from_transfer", "Создано в результате переноса", {"previous_booking_id": original.id, "reason": payload.reason})
+        db.commit(); db.refresh(item)
+    except Exception:
+        db.rollback(); raise
+    item.room = room
+    return item
+
+
+def create_service_blocks(db: Session, payload: ServiceBlockCreate, actor: User) -> list[Booking]:
+    dates = list(_dates(payload.date, payload.date_end))
+    rooms = list(db.scalars(select(Room).options(joinedload(Room.building)).where(
+        Room.id.in_(payload.room_ids), Room.is_active,
+    )))
+    if len(rooms) != len(payload.room_ids):
+        raise HTTPException(404, "Одна или несколько аудиторий не найдены")
+    for day in dates:
+        validate_booking_window(day, payload.time_start, payload.time_end, allow_started=True)
+        for room in rooms:
+            _lock(db, room.id, day)
+            if find_conflict(db, room.id, day, payload.time_start, payload.time_end):
+                raise HTTPException(409, f"Нельзя создать блокировку: {day.strftime('%d.%m.%Y')}, аудитория {room.number} уже занята")
+    series_id = str(uuid.uuid4())
+    created = []
+    try:
+        for day in dates:
+            for room in rooms:
+                item = Booking(
+                    room_id=room.id, owner_id=actor.id, date=day,
+                    time_start=payload.time_start, time_end=payload.time_end,
+                    title=payload.title.strip(), booking_type="service",
+                    booked_by=actor.full_name, email=actor.email,
+                    comment=payload.reason.strip(), requested_equipment=[],
+                    source="service_block", customer_name="Служебная блокировка",
+                    status="approved", record_kind=payload.record_kind, series_id=series_id,
+                )
+                db.add(item); db.flush()
+                record_event(db, item, actor, "service_block_created", "Создана служебная блокировка", {"kind": payload.record_kind, "reason": payload.reason, "series_id": series_id})
+                created.append(item)
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+    return created

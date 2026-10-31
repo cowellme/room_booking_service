@@ -1,0 +1,267 @@
+import datetime as dt
+from datetime import date, time
+from typing import Literal
+from pydantic import BaseModel, EmailStr, Field, model_validator
+
+
+MAX_EXTRA_ROOMS = 10
+
+
+class ExtraRoomRequest(BaseModel):
+    """An extra room booked together with the main one (same day; time defaults to the main booking)."""
+    room_id: int
+    purpose: str = Field(min_length=2, max_length=120)
+    time_start: time | None = None
+    time_end: time | None = None
+
+    @model_validator(mode="after")
+    def validate_extra(self):
+        self.purpose = self.purpose.strip()
+        if len(self.purpose) < 2:
+            raise ValueError("Укажите назначение дополнительной аудитории")
+        if (self.time_start is None) != (self.time_end is None):
+            raise ValueError("Укажите и начало, и окончание для дополнительной аудитории")
+        if self.time_start and self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        return self
+
+
+class BookingCreate(BaseModel):
+    room_id: int
+    date: date
+    time_start: time
+    time_end: time
+    title: str = Field(min_length=2, max_length=200)
+    booking_type: str = "other"
+    group_name: str | None = None
+    teacher: str | None = None
+    comment: str | None = Field(default=None, max_length=1000)
+    requested_equipment: list[str] = Field(default_factory=list, max_length=20)
+    catering_required: bool | None = None
+    participants: int | None = Field(default=None, ge=1, le=5000)
+    department_id: int | None = None
+    department_name: str | None = Field(default=None, min_length=2, max_length=250)
+    customer_name: str | None = Field(default=None, min_length=2, max_length=200)
+    customer_contact: str | None = Field(default=None, min_length=3, max_length=200)
+    external_channel: str | None = Field(default=None, max_length=40)
+    external_reference: str | None = Field(default=None, max_length=120)
+    external_url: str | None = Field(default=None, max_length=1000)
+    extra_rooms: list[ExtraRoomRequest] = Field(default_factory=list, max_length=MAX_EXTRA_ROOMS)
+
+    @model_validator(mode="after")
+    def validate_equipment(self):
+        if any(not item.strip() or len(item) > 100 for item in self.requested_equipment):
+            raise ValueError("Некорректное название дополнительного оснащения")
+        self.requested_equipment = list(dict.fromkeys(item.strip() for item in self.requested_equipment))
+        return self
+
+    @model_validator(mode="after")
+    def validate_time(self):
+        if self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        return self
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class RegisterRequest(LoginRequest):
+    full_name: str = Field(min_length=2, max_length=200)
+
+
+class RejectRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class AvailabilityRequest(BaseModel):
+    date: date
+    time_start: time
+    time_end: time
+    participants: int = Field(default=1, ge=1, le=5000)
+    building_id: int | None = None
+    room_type: str | None = None
+    equipment: list[str] = Field(default_factory=list, max_length=20)
+    exclude_booking_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_time(self):
+        if self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        return self
+
+
+class PhoneBookingCreate(BookingCreate):
+    customer_name: str = Field(min_length=2, max_length=200)
+    customer_contact: str = Field(min_length=3, max_length=200)
+    department_id: int
+    participants: int | None = Field(default=None, ge=1, le=5000)
+
+
+class BatchBookingCreate(BaseModel):
+    room_ids: list[int] = Field(min_length=1, max_length=30)
+    date: date
+    date_end: date
+    time_start: time
+    time_end: time
+    title: str = Field(min_length=2, max_length=200)
+    booking_type: str = "other"
+    group_name: str | None = None
+    teacher: str | None = None
+    comment: str | None = Field(default=None, max_length=1000)
+    requested_equipment: list[str] = Field(default_factory=list, max_length=20)
+    catering_required: bool | None = None
+    participants: int | None = Field(default=None, ge=1, le=5000)
+    customer_name: str | None = Field(default=None, max_length=200)
+    customer_contact: str | None = Field(default=None, max_length=200)
+    department_id: int | None = None
+    department_name: str | None = Field(default=None, max_length=250)
+    external_channel: str | None = Field(default=None, max_length=40)
+    external_reference: str | None = Field(default=None, max_length=120)
+    external_url: str | None = Field(default=None, max_length=1000)
+    weekdays: list[int] = Field(default_factory=lambda: list(range(7)), min_length=1, max_length=7)
+
+    @model_validator(mode="after")
+    def validate_series(self):
+        if self.date_end < self.date:
+            raise ValueError("Дата окончания серии должна быть не раньше даты начала")
+        if (self.date_end - self.date).days > 366:
+            raise ValueError("Серия не может быть длиннее одного года")
+        if any(day < 0 or day > 6 for day in self.weekdays):
+            raise ValueError("Некорректный день недели")
+        if self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        self.room_ids = list(dict.fromkeys(self.room_ids))
+        self.weekdays = list(dict.fromkeys(self.weekdays))
+        return self
+
+
+class SeriesAvailabilityRequest(BaseModel):
+    date: date
+    date_end: date
+    time_start: time
+    time_end: time
+    weekdays: list[int] = Field(default_factory=lambda: list(range(7)), min_length=1, max_length=7)
+    room_ids: list[int] = Field(default_factory=list, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.date_end < self.date:
+            raise ValueError("Дата окончания серии должна быть не раньше даты начала")
+        if (self.date_end - self.date).days > 366:
+            raise ValueError("Серия не может быть длиннее одного года")
+        if any(day < 0 or day > 6 for day in self.weekdays):
+            raise ValueError("Некорректный день недели")
+        if self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        return self
+
+
+class SeriesStatusRequest(BaseModel):
+    status: Literal["approved", "rejected"]
+    reason: str | None = Field(default=None, max_length=500)
+    # Approve the free dates and reject only the dates where the room is already taken.
+    skip_conflicts: bool = False
+
+
+class BookingTransferRequest(BookingCreate):
+    reason: str = Field(min_length=3, max_length=500)
+    notify_customer: bool = True
+
+
+class ServiceBlockCreate(BaseModel):
+    room_ids: list[int] = Field(min_length=1, max_length=100)
+    date: date
+    date_end: date
+    time_start: time
+    time_end: time
+    record_kind: Literal["maintenance", "setup", "teardown", "unavailable"]
+    title: str = Field(min_length=2, max_length=200)
+    reason: str = Field(min_length=2, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_block(self):
+        if self.date_end < self.date:
+            raise ValueError("Дата окончания должна быть не раньше даты начала")
+        if (self.date_end - self.date).days > 366:
+            raise ValueError("Период не может быть длиннее одного года")
+        if self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        self.room_ids = list(dict.fromkeys(self.room_ids))
+        return self
+
+
+class DepartmentCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=2, max_length=250)
+    curators: list[str] = Field(default_factory=list, max_length=20)
+
+
+class BookingCommentCreate(BaseModel):
+    text: str = Field(min_length=2, max_length=2000)
+
+
+class BookingCommentResolve(BaseModel):
+    resolved: bool = True
+
+
+class BookingUpdate(BaseModel):
+    room_id: int | None = None
+    date: dt.date | None = None
+    time_start: dt.time | None = None
+    time_end: dt.time | None = None
+    title: str | None = Field(default=None, min_length=2, max_length=200)
+    booking_type: str | None = None
+    group_name: str | None = Field(default=None, max_length=100)
+    teacher: str | None = Field(default=None, max_length=200)
+    customer_name: str | None = Field(default=None, min_length=2, max_length=200)
+    customer_contact: str | None = Field(default=None, max_length=200)
+    participants: int | None = Field(default=None, ge=1, le=5000)
+    comment: str | None = Field(default=None, max_length=1000)
+    requested_equipment: list[str] | None = Field(default=None, max_length=20)
+    catering_required: bool | None = None
+    department_id: int | None = None
+    external_channel: str | None = Field(default=None, max_length=40)
+    external_reference: str | None = Field(default=None, max_length=120)
+    external_url: str | None = Field(default=None, max_length=1000)
+
+
+class ExtraRoomsAdd(BaseModel):
+    extra_rooms: list[ExtraRoomRequest] = Field(min_length=1, max_length=MAX_EXTRA_ROOMS)
+
+
+class BookingCancelRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    comment: str = Field(min_length=2, max_length=1000)
+    replacement_offered: bool = False
+    notify_customer: bool = True
+
+
+class BookingStatusRequest(BaseModel):
+    status: Literal["approved", "rejected", "completed", "no_show"]
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class BookingArchiveRequest(BaseModel):
+    archived: bool = True
+
+class BuildingCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    address: str | None = Field(default=None, max_length=255)
+
+class RoomCreate(BaseModel):
+    number: str = Field(min_length=1, max_length=30)
+    name: str = Field(min_length=2, max_length=200)
+    building_id: int
+    floor: int = Field(ge=-2, le=100)
+    capacity: int = Field(ge=1, le=5000)
+    type: Literal["lecture", "seminar", "lab", "meeting", "office", "other"]
+    equipment: str = Field(default="", max_length=2000)
+    color: str = Field(default="#C81340", pattern=r"^#[0-9A-Fa-f]{6}$")
+
+class ProfileUpdate(BaseModel):
+    full_name: str = Field(min_length=2, max_length=200)
+    position: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=50)
+    department: str | None = Field(default=None, max_length=200)

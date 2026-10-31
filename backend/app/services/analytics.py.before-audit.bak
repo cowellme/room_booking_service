@@ -1,0 +1,178 @@
+"""Administrator analytics for a chosen period.
+
+A request (заявка) is the unit everywhere: a series counts once, the way the
+requester submitted it. Service blocks are not requests and are left out.
+"""
+from collections import Counter, defaultdict
+from datetime import date, datetime, time, timedelta, timezone
+from statistics import median
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session, joinedload
+
+from ..models import Booking, Room
+from ..timeutils import _ZONE, local_now
+
+OPEN_STATUSES = ("pending", "approved")
+# The state a whole series is shown with: the dates that still matter win over closed ones.
+STATUS_PRIORITY = ("pending", "approved", "completed", "no_show", "transferred", "rejected",
+                   "cancelled_by_user", "cancelled_by_admin", "cancelled")
+STATUS_LABELS = {
+    "pending": "На согласовании", "approved": "Подтверждено", "completed": "Состоялось",
+    "no_show": "Неявка", "rejected": "Отклонено", "cancelled": "Отменено",
+    "cancelled_by_user": "Отменено пользователем", "cancelled_by_admin": "Отменено администратором",
+    "transferred": "Перенесено",
+}
+SOURCE_LABELS = {
+    "self_service": "Заявка пользователя", "phone": "Оформлено по звонку",
+    "admin_direct": "Оформлено администратором", "admin_batch": "Серия администратора",
+    "transfer": "Перенос", "excel_import": "Импорт из Excel",
+}
+MAX_PERIOD_DAYS = 366
+TOP_LIMIT = 30
+
+
+def _local(value: datetime | None) -> datetime | None:
+    """Stored timestamps are UTC; reports speak in the institution's local time."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(_ZONE).replace(tzinfo=None)
+
+
+class Request:
+    """All records of one submission (a single booking or a whole series)."""
+
+    def __init__(self, records: list[Booking]):
+        # The main room of a set comes first, so the request is described by it.
+        records.sort(key=lambda item: (item.date, item.parent_booking_id is not None, item.time_start))
+        self.records = records
+        first = records[0]
+        self.first = first
+        statuses = {item.status for item in records}
+        self.status = next((status for status in STATUS_PRIORITY if status in statuses), first.status)
+        self.created = min(_local(item.created_at) or datetime.min for item in records)
+        self.person = (first.customer_name or first.booked_by or "").strip() or "Не указан"
+        self.department = first.department.name if first.department else "Не указано"
+        self.catering = next((item.catering_required for item in records if item.catering_required is not None), None)
+        self.equipment = sorted({value for item in records for value in (item.requested_equipment or [])})
+        self.building = first.room.building.name if first.room and first.room.building else "Не указан"
+
+    def is_open(self, now: datetime) -> bool:
+        return any(item.status in OPEN_STATUSES and datetime.combine(item.date, item.time_end) > now
+                   for item in self.records)
+
+    def completed_in(self, start: date, end: date) -> bool:
+        return any(item.status == "completed" and start <= item.date <= end for item in self.records)
+
+    def created_in(self, start: date, end: date) -> bool:
+        return start <= self.created.date() <= end
+
+
+def _requests(db: Session) -> list[Request]:
+    records = db.scalars(select(Booking).options(
+        joinedload(Booking.room).joinedload(Room.building), joinedload(Booking.department),
+    ).where(Booking.record_kind == "booking"))
+    groups: dict[str, list[Booking]] = defaultdict(list)
+    for item in records:
+        # A series and a set of rooms (main + extra) each count as one request.
+        groups[f"s:{item.series_id}" if item.series_id else f"b:{item.parent_booking_id or item.id}"].append(item)
+    return [Request(items) for items in groups.values()]
+
+
+def _change(current: int, previous: int) -> float | None:
+    if not previous:
+        return None
+    return round((current - previous) / previous * 100, 1)
+
+
+def _share(counter: Counter, order: list[str] | None = None) -> list[dict]:
+    keys = order or [key for key, _ in counter.most_common()]
+    return [{"label": key, "value": counter.get(key, 0)} for key in keys]
+
+
+def _durations(values: list[float]) -> dict:
+    return {"count": len(values), "median_minutes": round(median(values)) if values else None,
+            "max_minutes": round(max(values)) if values else None}
+
+
+def build_analytics(db: Session, date_from: date, date_to: date) -> dict:
+    if date_to < date_from:
+        raise HTTPException(400, "Дата окончания периода раньше даты начала")
+    if (date_to - date_from).days >= MAX_PERIOD_DAYS:
+        raise HTTPException(400, "Период отчёта не может быть длиннее года")
+    now = local_now()
+    length = (date_to - date_from).days + 1
+    previous_to = date_from - timedelta(days=1)
+    previous_from = previous_to - timedelta(days=length - 1)
+    requests = _requests(db)
+    new = [item for item in requests if item.created_in(date_from, date_to)]
+    previous_new = sum(item.created_in(previous_from, previous_to) for item in requests)
+    completed = sum(item.completed_in(date_from, date_to) for item in requests)
+    previous_completed = sum(item.completed_in(previous_from, previous_to) for item in requests)
+    current = [item for item in requests if item.is_open(now)]
+
+    people: dict[str, dict] = defaultdict(lambda: {"current": 0, "new": 0, "completed": 0})
+    for item in requests:
+        row = people[item.person]
+        row["current"] += item.is_open(now)
+        row["new"] += item.created_in(date_from, date_to)
+        row["completed"] += item.completed_in(date_from, date_to)
+    responsible = sorted(({"label": name, **row} for name, row in people.items() if any(row.values())),
+                         key=lambda row: (-row["current"], -row["new"], -row["completed"], row["label"]))
+
+    stages_now = Counter("Согласование заявки" if item.status == "pending" else "Подготовка и проведение"
+                         for item in current)
+    moderation, preparation, total = [], [], []
+    for item in new:
+        decided = [entry for entry in item.records if entry.decision_at and entry.decided_by_id]
+        if decided:
+            decision = min(_local(entry.decision_at) for entry in decided)
+            moderation.append((decision - item.created).total_seconds() / 60)
+            if item.status in ("approved", "completed", "no_show"):
+                start = datetime.combine(item.first.date, item.first.time_start)
+                preparation.append(max(0.0, (start - decision).total_seconds() / 60))
+        if item.status == "completed":
+            last = item.records[-1]
+            total.append((datetime.combine(last.date, last.time_end) - item.created).total_seconds() / 60)
+
+    rooms: Counter = Counter()
+    for item in requests:
+        for entry in item.records:
+            if entry.status in ("approved", "completed") and date_from <= entry.date <= date_to:
+                minutes = (datetime.combine(entry.date, entry.time_end) - datetime.combine(entry.date, entry.time_start)).total_seconds() / 60
+                rooms[f"{entry.room.number} · {entry.room.building.name}"] += minutes / 60
+
+    daily = Counter(item.created.date() for item in new)
+    days = [date_from + timedelta(days=offset) for offset in range(length)]
+    equipment_items = Counter(value for item in new for value in item.equipment)
+    return {
+        "period": {"from": date_from.isoformat(), "to": date_to.isoformat(), "days": length,
+                   "previous_from": previous_from.isoformat(), "previous_to": previous_to.isoformat()},
+        "generated_at": now.isoformat(timespec="minutes"),
+        "kpi": {
+            "current": len(current),
+            "new": len(new), "new_change": _change(len(new), previous_new),
+            "completed": completed, "completed_change": _change(completed, previous_completed),
+            "records_new": sum(len(item.records) for item in new),
+        },
+        "responsible": responsible,
+        "departments": _share(Counter(item.department for item in new))[:TOP_LIMIT],
+        "catering": _share(Counter({True: "Да", False: "Нет", None: "Не указано"}[item.catering] for item in new),
+                           ["Да", "Нет", "Не указано"]),
+        "equipment": _share(Counter("Да" if item.equipment else "Нет" for item in new), ["Да", "Нет"]),
+        "equipment_items": _share(equipment_items)[:TOP_LIMIT],
+        "buildings": _share(Counter(item.building for item in new)),
+        "outcomes": _share(Counter(STATUS_LABELS.get(item.status, item.status) for item in new)),
+        "sources": _share(Counter(SOURCE_LABELS.get(item.first.source, item.first.source) for item in new)),
+        "stages_now": _share(stages_now, ["Согласование заявки", "Подготовка и проведение"]),
+        "stage_times": [
+            {"label": "Согласование заявки", **_durations(moderation)},
+            {"label": "От решения до мероприятия", **_durations(preparation)},
+            {"label": "Весь путь заявки", **_durations(total)},
+        ],
+        "rooms_hours": [{"label": key, "value": round(value, 1)} for key, value in rooms.most_common(15)],
+        "daily_new": [{"date": day.isoformat(), "value": daily.get(day, 0)} for day in days],
+    }

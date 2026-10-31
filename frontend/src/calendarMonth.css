@@ -1,0 +1,19 @@
+.calendar-month-filter{position:relative;min-width:0;max-width:310px;justify-self:end}
+.calendar-month-label{display:block;font-size:14px;font-weight:700;margin-bottom:8px;color:#253048}
+.calendar-month-trigger{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;padding:10px 12px;border:1px solid #dce0e8;border-radius:9px;background:#fff;color:#253048;text-align:left}
+.calendar-month-trigger span{flex:1}
+.calendar-month-trigger svg{width:18px;height:18px;flex-shrink:0}
+.multi-filter.calendar-month-filter>.calendar-month-panel{position:absolute;top:calc(100% + 6px);left:auto;right:0;z-index:60;width:100%;max-width:calc(100vw - 40px);height:auto;max-height:none;overflow:visible;padding:14px;background:#fff;border:1px solid #e4d6dc;border-radius:15px;box-shadow:0 12px 35px #22243a22}
+.calendar-month-panel header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.calendar-month-panel header button{display:grid;place-items:center;width:34px;height:34px;border:1px solid #e7e8ee;border-radius:8px;background:#fff}
+.calendar-month-panel header strong{font-size:18px}
+.calendar-month-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.calendar-month-grid button{padding:11px 3px;border:1px solid #ececf1;border-radius:8px;background:#faf9fb;color:#253048;font-size:13px}
+.calendar-month-grid button:hover{background:#fcebf1;border-color:#c81340}
+.calendar-month-grid button[aria-current="date"]{border-color:#16836b}
+.calendar-month-grid button.active{background:#c81340;border-color:#c81340;color:#fff;font-weight:700}
+.calendar-month-current{width:100%;margin-top:12px;padding:9px;border:0;border-radius:8px;color:#a61036;background:#fff0f4;font-weight:600}
+.calendar-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;grid-column:2;grid-row:1;min-width:0}
+.calendar-toolbar-actions .view-switch,.calendar-toolbar-actions .calendar-nav-v2{flex-shrink:0}
+@media(max-width:1100px){.calendar-operations-shell .calendar-toolbar-v2{display:flex;flex-wrap:wrap;gap:12px}.calendar-toolbar-actions{justify-content:flex-start}}
+@media(max-width:600px){.calendar-toolbar-actions{gap:8px}.calendar-toolbar-actions .view-switch button,.calendar-toolbar-actions .calendar-nav-v2 button{padding:0 9px}.calendar-month-filter{justify-self:start}.multi-filter.calendar-month-filter>.calendar-month-panel{left:0;right:auto}}

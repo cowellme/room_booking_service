@@ -1,0 +1,12 @@
+.booking-required-questions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.booking-required-question{min-width:0;margin:0;padding:12px;border:1px solid #dce2eb;border-radius:12px;background:#fff}
+.booking-required-question legend{font-weight:650;padding:0 5px;font-size:14px}
+.booking-required-question label{display:inline-flex!important;align-items:center;gap:7px;margin:8px 20px 0 0}
+.booking-required-question input{width:auto!important;height:auto!important;accent-color:#c81340}
+.booking-required-question.answered{border-color:#79bb96;background:#f0faf4}
+.booking-required-question.unanswered{border-color:#da3458;background:#fff0f4}
+.booking-required-question small{display:block;color:#bd173e;margin-top:8px}
+.review-deadline{display:flex;flex-wrap:wrap;gap:4px 12px;padding:9px 12px;border-radius:9px;background:#eef5ff;color:#204f88;font-size:12px;margin:8px 0}
+.review-deadline.urgent,.review-deadline.expired{background:#fff0e6;color:#984308;border:1px solid #f0b68e}
+.moderation-list>article.review-urgent{box-shadow:inset 4px 0 #e98127;background:#fffaf5}
+@media(max-width:600px){.booking-required-questions{grid-template-columns:1fr}}

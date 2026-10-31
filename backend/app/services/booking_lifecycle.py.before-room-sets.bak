@@ -1,0 +1,287 @@
+"""State transitions for bookings.
+
+HTTP handlers delegate here so cancellation, archiving and status changes keep
+the same validation and audit behaviour regardless of the entry point.
+"""
+from datetime import datetime
+
+from fastapi import HTTPException
+from sqlalchemy import and_, or_, select, text
+from sqlalchemy.orm import Session, joinedload
+
+from ..models import Booking, User
+from ..timeutils import local_now
+from .bookings import find_conflict, record_event, reject_competing_requests
+
+
+CLOSED_BOOKING_STATUSES = frozenset({
+    "cancelled", "cancelled_by_user", "cancelled_by_admin",
+    "rejected", "completed", "no_show", "transferred",
+})
+
+
+def expire_pending_requests(db: Session) -> int:
+    """Bring records in line with the clock.
+
+    A request stays in moderation until the event itself starts: only then it
+    is closed as not reviewed. Confirmed bookings whose time has passed are
+    marked as completed, so the lists do not keep stale "confirmed" records.
+    """
+    local = local_now()
+    today, current = local.date(), local.time()
+    now = datetime.utcnow()
+    started = or_(Booking.date < today, and_(Booking.date == today, Booking.time_start <= current))
+    finished = or_(Booking.date < today, and_(Booking.date == today, Booking.time_end <= current))
+    expired = list(db.scalars(select(Booking).options(joinedload(Booking.owner)).where(
+        Booking.status == "pending", started,
+    )))
+    for booking in expired:
+        booking.status = "rejected"
+        booking.updated_at = now
+        booking.decision_at = now
+        booking.decision_reason = "Заявка не была рассмотрена до начала мероприятия"
+        booking.hold_expires_at = None
+        record_event(
+            db, booking, booking.owner, "expired", "Заявка не была рассмотрена до начала мероприятия",
+            {"system": True, "previous_status": "pending"},
+        )
+    completed = list(db.scalars(select(Booking).options(joinedload(Booking.owner)).where(
+        Booking.status == "approved", Booking.record_kind == "booking", finished,
+    )))
+    for booking in completed:
+        booking.status = "completed"
+        booking.updated_at = now
+        record_event(
+            db, booking, booking.owner, "completed", "Мероприятие завершено",
+            {"system": True, "previous_status": "approved"},
+        )
+    if expired or completed:
+        db.commit()
+    return len(expired)
+
+STATUS_SUMMARIES = {
+    "approved": "Бронирование подтверждено",
+    "rejected": "Заявка отклонена",
+    "completed": "Мероприятие состоялось",
+    "no_show": "Заказчик не пришёл",
+}
+
+ALLOWED_STATUS_TRANSITIONS = {
+    "pending": {"approved", "rejected"},
+    "approved": {"completed", "no_show"},
+    # Past bookings are completed automatically; the administrator can still correct the outcome.
+    "completed": {"no_show"},
+    "no_show": {"completed"},
+}
+
+
+def event_started(booking: Booking) -> bool:
+    now = local_now()
+    return booking.date < now.date() or (booking.date == now.date() and booking.time_start <= now.time())
+
+
+def get_booking_or_404(db: Session, booking_id: int) -> Booking:
+    booking = db.get(Booking, booking_id)
+    if not booking:
+        raise HTTPException(404, "Бронирование не найдено")
+    return booking
+
+
+def ensure_booking_open(booking: Booking) -> None:
+    if booking.status in CLOSED_BOOKING_STATUSES:
+        raise HTTPException(409, "Бронирование уже закрыто")
+
+
+def cancel_booking_record(
+    db: Session,
+    booking: Booking,
+    actor: User,
+    *,
+    reason: str,
+    comment: str,
+    replacement_offered: bool,
+    notify_customer: bool,
+) -> None:
+    ensure_booking_open(booking)
+    if actor.role != "admin" and event_started(booking):
+        raise HTTPException(409, "Мероприятие уже началось — отменить его нельзя")
+    _apply_cancellation(db, booking, actor, reason=reason, comment=comment,
+                        replacement_offered=replacement_offered, notify_customer=notify_customer)
+    db.commit()
+
+
+def _apply_cancellation(
+    db: Session, booking: Booking, actor: User, *, reason: str, comment: str,
+    replacement_offered: bool, notify_customer: bool,
+) -> None:
+    booking.status = "cancelled_by_admin" if actor.role == "admin" else "cancelled_by_user"
+    booking.cancelled_at = datetime.utcnow()
+    booking.cancelled_by_id = actor.id
+    booking.cancellation_reason = reason.strip()
+    booking.cancellation_comment = comment.strip()
+    booking.replacement_offered = replacement_offered
+    booking.notify_customer = notify_customer
+    record_event(
+        db, booking, actor, booking.status, "Бронирование отменено",
+        {
+            "reason": booking.cancellation_reason,
+            "comment": booking.cancellation_comment,
+            "replacement_offered": replacement_offered,
+            "notify_customer": notify_customer,
+        },
+    )
+
+
+def cancel_series_records(
+    db: Session,
+    series_id: str,
+    actor: User,
+    *,
+    reason: str,
+    comment: str,
+    replacement_offered: bool,
+    notify_customer: bool,
+) -> int:
+    """Cancel every open date of a series in one transaction.
+
+    Dates that are already closed are skipped, so a repeated request does not
+    fail halfway. A user cannot cancel dates that have already started.
+    """
+    stmt = select(Booking).where(Booking.series_id == series_id, Booking.status.not_in(CLOSED_BOOKING_STATUSES))
+    if actor.role != "admin":
+        stmt = stmt.where(Booking.owner_id == actor.id)
+    items = [item for item in db.scalars(stmt) if actor.role == "admin" or not event_started(item)]
+    if not items:
+        raise HTTPException(409, "В серии не осталось дат, которые можно отменить")
+    for item in items:
+        _apply_cancellation(db, item, actor, reason=reason, comment=comment,
+                            replacement_offered=replacement_offered, notify_customer=notify_customer)
+    db.commit()
+    return len(items)
+
+
+def set_booking_archived(db: Session, booking: Booking, actor: User, archived: bool) -> None:
+    now = local_now()
+    event_finished = booking.date < now.date() or (booking.date == now.date() and booking.time_end <= now.time())
+    if archived and booking.status not in CLOSED_BOOKING_STATUSES and not event_finished:
+        raise HTTPException(409, "В архив можно переносить только завершённые, отменённые или прошедшие бронирования")
+    booking.archived_at = datetime.utcnow() if archived else None
+    booking.archived_by_id = actor.id if archived else None
+    event_type = "archived" if archived else "restored_from_archive"
+    summary = "Бронирование перенесено в архив" if archived else "Бронирование восстановлено из архива"
+    record_event(db, booking, actor, event_type, summary)
+    db.commit()
+
+
+def delete_booking_record(db: Session, booking: Booking) -> None:
+    """Permanently remove an erroneous standalone record.
+
+    Records referenced by a transfer must remain available as part of the
+    transfer history. Related comments and audit rows are removed by cascade.
+    """
+    dependent_id = db.scalar(select(Booking.id).where(Booking.previous_booking_id == booking.id).limit(1))
+    if dependent_id:
+        raise HTTPException(409, "Эту запись нельзя удалить: с ней связана перенесённая бронь")
+    db.delete(booking)
+    db.commit()
+
+
+def transition_booking_status(
+    db: Session, booking: Booking, actor: User, status: str, reason: str | None = None,
+) -> None:
+    if booking.status == "pending":
+        # Close requests whose time has come before deciding, so a long-open page cannot approve them.
+        expire_pending_requests(db)
+        if booking.status != "pending":
+            raise HTTPException(409, "Время мероприятия уже наступило — заявка закрыта как нерассмотренная")
+    if status not in ALLOWED_STATUS_TRANSITIONS.get(booking.status, set()):
+        raise HTTPException(409, "Недопустимый переход статуса бронирования")
+    if status in {"completed", "no_show"} and not event_started(booking):
+        raise HTTPException(409, "Отметить «Состоялось» или «Неявка» можно только после начала мероприятия")
+    if status == "rejected":
+        reason = (reason or "").strip()
+    if status == "approved":
+        lock_key = booking.date.toordinal() * 100000 + booking.room_id
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+        conflict = find_conflict(
+            db, booking.room_id, booking.date, booking.time_start, booking.time_end, booking.id,
+        )
+        if conflict:
+            raise HTTPException(409, "Подтверждение невозможно: аудитория уже занята")
+    if status == "rejected" and not reason:
+        raise HTTPException(400, "Укажите причину отказа")
+    previous = booking.status
+    booking.status = status
+    booking.updated_at = datetime.utcnow()
+    if status in {"approved", "rejected"}:
+        booking.decision_at = datetime.utcnow()
+        booking.decided_by_id = actor.id
+        booking.decision_reason = reason.strip() if reason else None
+        booking.hold_expires_at = None
+    record_event(
+        db, booking, actor, status, STATUS_SUMMARIES[status],
+        {"previous_status": previous, "reason": reason},
+    )
+    if status == "approved":
+        reject_competing_requests(db, booking, actor)
+    db.commit()
+
+
+SERIES_DATE_BUSY_REASON = "Аудитория в эту дату уже занята"
+
+
+def transition_series_status(
+    db: Session, series_id: str, actor: User, status: str, reason: str | None = None,
+    skip_conflicts: bool = False,
+) -> int:
+    """Approve or reject every pending request of a series in one transaction.
+
+    With `skip_conflicts` the free dates are approved and the busy ones are
+    rejected, so one taken date does not block the whole series.
+    """
+    expire_pending_requests(db)
+    if status not in {"approved", "rejected"}:
+        raise HTTPException(400, "Для серии доступно только подтверждение или отказ")
+    if status == "rejected" and not (reason and reason.strip()):
+        raise HTTPException(400, "Укажите причину отказа")
+    items = list(db.scalars(select(Booking).options(joinedload(Booking.room)).where(
+        Booking.series_id == series_id, Booking.status == "pending",
+    ).order_by(Booking.date, Booking.time_start)))
+    if not items:
+        raise HTTPException(404, "В серии нет заявок, ожидающих решения")
+    busy: list[Booking] = []
+    if status == "approved":
+        problems = []
+        for booking in items:
+            lock_key = booking.date.toordinal() * 100000 + booking.room_id
+            db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+            if find_conflict(db, booking.room_id, booking.date, booking.time_start, booking.time_end, booking.id):
+                busy.append(booking)
+                problems.append(f"{booking.date.strftime('%d.%m.%Y')}, ауд. {booking.room.number}")
+        if busy and skip_conflicts and len(busy) < len(items):
+            problems = []
+        if problems:
+            more = f" и ещё {len(problems) - 8}" if len(problems) > 8 else ""
+            raise HTTPException(409, "Серию нельзя подтвердить целиком — аудитория уже занята: " + "; ".join(problems[:8]) + more)
+    now = datetime.utcnow()
+    busy_ids = {booking.id for booking in busy}
+    for booking in items:
+        item_status = "rejected" if booking.id in busy_ids else status
+        item_reason = SERIES_DATE_BUSY_REASON if booking.id in busy_ids else reason
+        booking.status = item_status
+        booking.updated_at = now
+        booking.decision_at = now
+        booking.decided_by_id = actor.id
+        booking.decision_reason = item_reason.strip() if item_reason else None
+        booking.hold_expires_at = None
+        record_event(
+            db, booking, actor, item_status, STATUS_SUMMARIES[item_status],
+            {"previous_status": "pending", "reason": item_reason, "series_id": series_id},
+        )
+    if status == "approved":
+        db.flush()
+        for booking in items:
+            if booking.id not in busy_ids:
+                reject_competing_requests(db, booking, actor)
+    db.commit()
+    return len(items)

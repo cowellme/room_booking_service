@@ -1,0 +1,210 @@
+from datetime import date, datetime, time, timedelta
+import hashlib
+from fastapi import HTTPException
+from sqlalchemy import and_, func, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload
+from ..config import settings
+from ..models import Booking, BookingEvent, BookingHistory, Department, Room, User
+from ..schemas import BookingCreate
+from ..timeutils import local_now, utc_now
+from .booking_locks import lock_booking_rows
+from .work_calendar import add_working_days
+
+
+def earliest_booking_date(today: date) -> date:
+    """Seven working days, including official holiday/weekend transfers."""
+    return add_working_days(today)
+
+
+def validate_booking_lead_time(booking_date: date) -> None:
+    earliest = earliest_booking_date(local_now().date())
+    if booking_date < earliest:
+        raise HTTPException(400, f"Заявку необходимо подать не менее чем за 7 рабочих дней. Ближайшая доступная дата: {earliest:%d.%m.%Y}. Учтены праздники и переносы выходных дней.")
+
+
+def validate_booking_window(booking_date: date, start: time, end: time, *, allow_started: bool = False) -> None:
+    # The checks below count whole minutes: 10:00:59–10:30:01 would pass as 30 minutes.
+    if any(value.second or value.microsecond or value.tzinfo for value in (start, end)):
+        raise HTTPException(400, "Время указывается в часах и минутах, без секунд и часового пояса")
+    now = local_now()
+    if booking_date < now.date():
+        raise HTTPException(400, "Нельзя бронировать прошедшую дату")
+    if (booking_date - now.date()).days > settings.max_days_ahead:
+        raise HTTPException(400, f"Бронировать можно не дальше чем на {settings.max_days_ahead} дней вперёд")
+    if booking_date == now.date() and not allow_started and start <= now.time():
+        raise HTTPException(400, "Нельзя бронировать уже прошедшее время")
+    start_minutes = start.hour * 60 + start.minute
+    end_minutes = end.hour * 60 + end.minute
+    duration = end_minutes - start_minutes
+    if start_minutes < settings.work_hours_start * 60 or end_minutes > settings.work_hours_end * 60:
+        raise HTTPException(400, f"Бронирование доступно с {settings.work_hours_start:02d}:00 до {settings.work_hours_end:02d}:00")
+    if duration < settings.min_booking_minutes or duration > settings.max_booking_minutes:
+        raise HTTPException(400, f"Продолжительность бронирования — от {settings.min_booking_minutes} минут до {settings.max_booking_minutes // 60} часов")
+    if start_minutes % settings.slot_minutes or end_minutes % settings.slot_minutes:
+        raise HTTPException(400, f"Время должно быть кратно {settings.slot_minutes} минутам")
+
+
+# Pending user requests are a soft reserve. Only approved records block a room;
+# moderation still sees competing pending requests and decides which one wins.
+BLOCKING_STATUSES = ("approved",)
+
+
+def capacity_limit(room: Room) -> int:
+    """Hard limit of people: the maximum with extra seating, or the regular capacity.
+
+    Up to the regular capacity a request is ordinary; between the regular and the
+    maximum it is accepted but flagged for the administrator (over_capacity).
+    """
+    return max(getattr(room, "max_capacity", None) or 0, room.capacity)
+
+
+def check_capacity(room: Room, participants: int | None) -> None:
+    limit = capacity_limit(room)
+    if participants and participants > limit:
+        raise HTTPException(400, f"Аудитория {room.number} вмещает {limit} чел., а участников заявлено {participants}")
+
+
+def record_event(db: Session, booking: Booking, actor: User, event_type: str, summary: str, data: dict | None = None) -> None:
+    db.add(BookingEvent(booking_id=booking.id, actor_id=actor.id, event_type=event_type,
+                        summary=summary, data=data or {}))
+    # Keep the legacy audit table populated for compatibility with existing reports.
+    db.add(BookingHistory(booking_id=booking.id, actor_id=actor.id, action=event_type,
+                          details=summary))
+
+
+def find_conflict(db: Session, room_id: int, booking_date: date, start: time, end: time,
+                  exclude_booking_id: int | None = None) -> Booking | None:
+    stmt = select(Booking).where(and_(
+        Booking.room_id == room_id, Booking.date == booking_date,
+        Booking.status.in_(BLOCKING_STATUSES), Booking.time_start < end,
+        Booking.time_end > start,
+    ))
+    if exclude_booking_id:
+        stmt = stmt.where(Booking.id != exclude_booking_id)
+    return db.scalar(stmt.order_by(Booking.time_start))
+
+
+COMPETING_REJECT_REASON = "Аудитория занята: на это время подтверждено другое бронирование"
+
+
+def reject_competing_requests(db: Session, booking: Booking, actor: User) -> int:
+    """Close pending requests that can no longer be approved because `booking` now holds the slot.
+
+    Without this they stay in moderation until the event starts and then expire
+    as "not reviewed", so the requester learns about the refusal too late.
+    """
+    competing = lock_booking_rows(db, select(Booking).options(joinedload(Booking.owner)).where(
+        Booking.room_id == booking.room_id, Booking.date == booking.date, Booking.status == "pending",
+        Booking.time_start < booking.time_end, Booking.time_end > booking.time_start, Booking.id != booking.id,
+    ).order_by(Booking.id))
+    now = utc_now()
+    for item in competing:
+        item.status = "rejected"
+        item.updated_at = now
+        item.decision_at = now
+        item.decided_by_id = actor.id
+        item.decision_reason = COMPETING_REJECT_REASON
+        item.hold_expires_at = None
+        record_event(db, item, actor, "rejected", "Заявка отклонена",
+                     {"previous_status": "pending", "reason": COMPETING_REJECT_REASON, "approved_booking_id": booking.id})
+    return len(competing)
+
+
+def find_own_duplicate(db: Session, owner_id: int, room_id: int, booking_date: date, start: time, end: time) -> Booking | None:
+    """An open request of the same person for the same room and overlapping time."""
+    return db.scalar(select(Booking).where(
+        Booking.owner_id == owner_id, Booking.room_id == room_id, Booking.date == booking_date,
+        Booking.status.in_(("pending", "approved")), Booking.time_start < end, Booking.time_end > start,
+    ).limit(1))
+
+
+def resolve_typed_department(db: Session, name: str, actor: User) -> Department:
+    """Department typed by hand ("Нет в списке").
+
+    A user's entry is stored for the booking only and does not appear in the
+    shared directory until an administrator adds it, so typos do not spread.
+    The requester's profile is never changed by a booking.
+    """
+    name = name.strip()
+    department = db.scalar(select(Department).where(func.lower(Department.name) == name.lower()))
+    if not department:
+        code = "USER-" + hashlib.sha1(name.casefold().encode("utf-8")).hexdigest()[:10].upper()
+        department = db.scalar(select(Department).where(Department.code == code))
+    if not department:
+        # Two requests may type the same new name at once: the second one reuses the
+        # row the first one created instead of failing on the unique code.
+        try:
+            with db.begin_nested():
+                department = Department(code=code, name=name, is_active=actor.role == "admin")
+                db.add(department)
+                db.flush()
+        except IntegrityError:
+            department = db.scalar(select(Department).where(Department.code == code))
+            if not department:
+                raise
+    elif actor.role == "admin":
+        department.is_active = True
+    return department
+
+
+def create_booking(db: Session, payload: BookingCreate, owner: User, *, source: str | None = None,
+                   customer_name: str | None = None, customer_contact: str | None = None,
+                   participants: int | None = None) -> Booking:
+    validate_booking_lead_time(payload.date)
+    validate_booking_window(payload.date, payload.time_start, payload.time_end)
+    room = db.scalar(select(Room).options(joinedload(Room.building)).where(Room.id == payload.room_id, Room.is_active))
+    if not room:
+        raise HTTPException(404, "Аудитория не найдена")
+    department_id = payload.department_id
+    raw_department_name = getattr(payload, "department_name", None)
+    department_name = raw_department_name.strip() if raw_department_name else None
+    check_capacity(room, participants if participants is not None else payload.participants)
+    if department_id:
+        chosen = db.get(Department, department_id)
+        if not chosen:
+            raise HTTPException(404, "Подразделение не найдено")
+    if not department_id and department_name:
+        department_id = resolve_typed_department(db, department_name, owner).id
+    # Advisory lock serializes bookings for the same room/date in PostgreSQL.
+    lock_key = payload.date.toordinal() * 100000 + payload.room_id
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+    conflict = find_conflict(db, payload.room_id, payload.date, payload.time_start, payload.time_end)
+    if conflict:
+        raise HTTPException(409, "Это время уже занято")
+    if owner.role != "admin" and find_own_duplicate(db, owner.id, payload.room_id, payload.date, payload.time_start, payload.time_end):
+        raise HTTPException(409, "У вас уже есть заявка на это время в этой аудитории")
+    data = payload.model_dump()
+    data.pop("extra_rooms", None)
+    requested_participants = data.pop("participants", None)
+    data.pop("department_name", None)
+    data["department_id"] = department_id
+    payload_customer_name = data.pop("customer_name", None)
+    payload_customer_contact = data.pop("customer_contact", None)
+    data["booked_by"] = owner.full_name
+    data["email"] = owner.email
+    initial_status = "approved" if owner.role == "admin" else "pending"
+    item = Booking(**data, owner_id=owner.id, status=initial_status,
+                   source=source or ("admin_direct" if owner.role == "admin" else "self_service"),
+                   customer_name=customer_name or payload_customer_name or owner.full_name,
+                   customer_contact=customer_contact or payload_customer_contact or owner.email,
+                   participants=participants if participants is not None else requested_participants,
+                   hold_expires_at=None)
+    try:
+        db.add(item); db.flush()
+        record_event(db, item, owner, "created", "Бронирование создано",
+                     {"source": item.source, "room_id": item.room_id, "date": item.date.isoformat(),
+                      "time_start": item.time_start.strftime("%H:%M"), "time_end": item.time_end.strftime("%H:%M")})
+        if initial_status == "approved":
+            record_event(db, item, owner, "approved", "Бронирование подтверждено администратором")
+            reject_competing_requests(db, item, owner)
+        if payload.extra_rooms:
+            from .room_sets import create_extra_rooms
+            create_extra_rooms(db, item, payload.extra_rooms, owner)
+        db.commit()
+        db.refresh(item)
+    except Exception:
+        db.rollback()
+        raise
+    item.room = room
+    return item

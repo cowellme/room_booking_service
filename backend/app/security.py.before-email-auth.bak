@@ -1,0 +1,48 @@
+from datetime import datetime, timedelta, timezone
+import secrets
+import jwt
+from fastapi import Depends, Header, HTTPException, Request, status
+from pwdlib import PasswordHash
+from sqlalchemy.orm import Session
+from .config import settings
+from .database import get_db
+from .models import User
+
+password_hash = PasswordHash.recommended()
+COOKIE_NAME = "room_booking_session"
+
+def hash_password(password: str) -> str: return password_hash.hash(password)
+def verify_password(password: str, hashed: str) -> bool: return password_hash.verify(password, hashed)
+
+def create_session(user: User) -> tuple[str, str]:
+    csrf = secrets.token_urlsafe(24)
+    payload = {"sub": str(user.id), "role": user.role, "csrf": csrf,
+               "exp": datetime.now(timezone.utc) + timedelta(hours=8), "iat": datetime.now(timezone.utc)}
+    return jwt.encode(payload, settings.secret_key, algorithm="HS256"), csrf
+
+def decode_session(token: str) -> dict:
+    try: return jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+    except jwt.PyJWTError: raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Сессия недействительна")
+
+def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    token = request.cookies.get(COOKIE_NAME)
+    if not token: raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Требуется вход")
+    payload = decode_session(token)
+    user = db.get(User, int(payload["sub"]))
+    if not user or not user.is_active: raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Пользователь недоступен")
+    return user
+
+def csrf_protected(request: Request, x_csrf_token: str | None = Header(None), user: User = Depends(current_user)) -> User:
+    payload = decode_session(request.cookies[COOKIE_NAME])
+    if not x_csrf_token or not secrets.compare_digest(x_csrf_token, payload.get("csrf", "")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF-проверка не пройдена")
+    return user
+
+def admin_user(user: User = Depends(csrf_protected)) -> User:
+    if user.role != "admin": raise HTTPException(status.HTTP_403_FORBIDDEN, "Недостаточно прав")
+    return user
+
+def admin_read_user(user: User = Depends(current_user)) -> User:
+    """Admin authorization for safe read-only requests; CSRF is not applicable to GET."""
+    if user.role != "admin": raise HTTPException(status.HTTP_403_FORBIDDEN, "Недостаточно прав")
+    return user

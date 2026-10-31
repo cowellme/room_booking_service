@@ -1,0 +1,12 @@
+.booking-number-search-row{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap;margin:18px 0 12px}
+.booking-number-search{display:grid;gap:7px;width:min(100%,360px);font-size:14px;font-weight:700;color:#252c42}
+.booking-number-search>div{display:flex;align-items:center;gap:10px;min-width:0;height:46px;padding:0 12px;background:#fff;border:1px solid #d9dce4;border-radius:10px}
+.booking-number-search>div:focus-within{border-color:#bd1640;box-shadow:0 0 0 3px #bd16401a}
+.booking-number-search svg{width:18px;height:18px;flex:none;color:#8b8f9b}
+.booking-number-search input{width:100%;min-width:0;border:0;outline:0;background:transparent;color:#252c42;font:inherit;font-weight:400}
+.booking-number-search button{display:grid;place-items:center;padding:2px;border:0;background:transparent;cursor:pointer}
+.booking-number-search-row p{margin:0 0 11px;color:#667085;font-size:13px}
+.booking-found-number{display:inline-block;margin-bottom:8px;padding:5px 9px;border-radius:6px;background:#fcecf1;color:#a11038;font-size:12px;font-weight:700}
+.booking-unified-search-note{margin:8px 0;color:#667085;font-size:13px}
+.app-shell>main.admin-bookings-main{padding-top:10px}
+.admin-bookings-main .admin-booking-center{padding-top:14px}

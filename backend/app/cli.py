@@ -1,0 +1,96 @@
+import argparse, getpass, json
+from sqlalchemy import select
+from .database import SessionLocal
+from .models import User
+from .security import hash_password
+from .services.auth import clear_login_failures, utcnow
+from .services.mailer import EmailDeliveryError, send_email
+from .config import settings
+from .catalog import count_bookings, replace_catalog, sync_catalog
+from .excel_import import import_excel
+from .services.lifecycle_worker import run_lifecycle_once
+from .maintenance import fix_naive_timestamps
+from datetime import datetime
+
+def create_admin(email: str, full_name: str):
+    password = getpass.getpass("Admin password: ")
+    if len(password) < 12: raise SystemExit("Password must contain at least 12 characters")
+    with SessionLocal() as db:
+        if db.scalar(select(User.id).where(User.role == "admin")):
+            raise SystemExit("Administrator already exists. Use reset-password for the existing account.")
+        if db.scalar(select(User.id).where(User.email == email.lower())): raise SystemExit("User already exists")
+        now = utcnow()
+        db.add(User(email=email.lower(), full_name=full_name, password_hash=hash_password(password), role="admin",
+                    email_verified_at=now, password_changed_at=now)); db.commit()
+        print("Administrator created")
+
+def reset_password(email: str):
+    password = getpass.getpass("New password: ")
+    confirmation = getpass.getpass("Repeat new password: ")
+    if password != confirmation:
+        raise SystemExit("Passwords do not match")
+    if len(password) < 12:
+        raise SystemExit("Password must contain at least 12 characters")
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email.lower()))
+        if not user:
+            raise SystemExit("User not found")
+        user.password_hash = hash_password(password)
+        user.password_changed_at = utcnow()
+        user.session_version = (user.session_version or 0) + 1
+        clear_login_failures(user)
+        db.commit()
+        print(f"Password updated for {user.email}")
+def unlock_user(email: str):
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email.lower()))
+        if not user:
+            raise SystemExit("User not found")
+        clear_login_failures(user)
+        db.commit()
+        print(f"Login lock cleared for {user.email}")
+
+def send_test_email(to: str):
+    print(f"EMAIL_MODE={settings.email_mode}, SMTP {settings.smtp_host}:{settings.smtp_port} ({settings.smtp_security}), from {settings.smtp_from or '-'}")
+    try:
+        send_email(to, "Проверка почты сервиса бронирования", "Это тестовое письмо. Если вы его получили, отправка почты настроена правильно.")
+    except EmailDeliveryError as exc:
+        raise SystemExit(f"Sending failed: {exc}")
+    print("Sent" if settings.email_mode == "smtp" else "EMAIL_MODE=log: the message was written to the log above, nothing was sent")
+
+if __name__ == "__main__":
+    parser=argparse.ArgumentParser(); sub=parser.add_subparsers(dest="command",required=True)
+    admin=sub.add_parser("create-admin"); admin.add_argument("--email",required=True); admin.add_argument("--name",required=True)
+    reset=sub.add_parser("reset-password"); reset.add_argument("--email",required=True)
+    catalog=sub.add_parser("replace-catalog", help="Wipe ALL bookings, rooms and buildings and reload the catalog (empty/test database only)")
+    catalog.add_argument("--confirm",action="store_true"); catalog.add_argument("--delete-bookings",action="store_true")
+    sync=sub.add_parser("sync-catalog", help="Update rooms from catalog_data.json, keeping bookings (dry run without --confirm)")
+    sync.add_argument("--confirm",action="store_true")
+    excel=sub.add_parser("import-excel"); excel.add_argument("--file",required=True); excel.add_argument("--admin-email",required=True); excel.add_argument("--confirm",action="store_true")
+    unlock=sub.add_parser("unlock-user", help="Clear the failed-login pause of one account"); unlock.add_argument("--email",required=True)
+    test_mail=sub.add_parser("send-test-email", help="Check SMTP settings"); test_mail.add_argument("--to",required=True)
+    sub.add_parser("process-due-bookings", help="Run one automatic booking lifecycle cycle")
+    stamps=sub.add_parser("fix-timestamps", help="Repair times stored by versions before the UTC fix (dry run without --confirm)")
+    stamps.add_argument("--before",required=True,help="When the fixed version was started, local time, e.g. 2026-10-28T09:00"); stamps.add_argument("--confirm",action="store_true")
+    args=parser.parse_args()
+    if args.command == "create-admin": create_admin(args.email,args.name)
+    elif args.command == "reset-password": reset_password(args.email)
+    elif args.command == "unlock-user": unlock_user(args.email)
+    elif args.command == "send-test-email": send_test_email(args.to)
+    elif args.command == "fix-timestamps":
+        print(json.dumps(fix_naive_timestamps(datetime.fromisoformat(args.before), args.confirm), ensure_ascii=False, indent=2))
+        print("Timestamps updated" if args.confirm else "Preview only: add --confirm to apply")
+    elif args.command == "process-due-bookings": print(json.dumps(run_lifecycle_once(), ensure_ascii=False))
+    elif args.command == "import-excel":
+        result=import_excel(args.file,args.admin_email,args.confirm)
+        print("Import complete" if args.confirm else "Preview only")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command == "sync-catalog":
+        print(json.dumps(sync_catalog(args.confirm), ensure_ascii=False, indent=2))
+        print("Catalog updated" if args.confirm else "Preview only: add --confirm to apply")
+    elif not args.confirm: raise SystemExit("Use --confirm: this replaces buildings, rooms and existing bookings")
+    elif (existing := count_bookings()) and not args.delete_bookings:
+        raise SystemExit(f"The database has {existing} bookings and replace-catalog would delete them all. "
+                         "Use sync-catalog to update rooms, or add --delete-bookings if this really is a test database")
+    else:
+        buildings,rooms=replace_catalog(); print(f"Catalog replaced: {buildings} buildings, {rooms} rooms")

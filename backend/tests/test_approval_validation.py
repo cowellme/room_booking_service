@@ -1,0 +1,196 @@
+"""Moderation must recheck current conditions, not only the submission-time data."""
+from dataclasses import replace
+from datetime import datetime, time, timedelta
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import event, func, select, update
+from sqlalchemy.exc import OperationalError
+
+from app.models import Booking, BookingEvent, Room
+from app.schemas import BatchBookingCreate, BookingCreate, ExtraRoomRequest
+from app.services import booking_lifecycle as lifecycle, bookings, operations, room_sets
+from app.services.approval_validation import validate_approval_conditions
+from test_booking_concurrency import race, payload, DAY
+
+
+def assert_denied(call, detail):
+    with pytest.raises(HTTPException) as caught:
+        call()
+    assert caught.value.status_code == 409
+    assert detail in caught.value.detail
+    return caught.value.detail
+
+
+def approve(race, db, booking_id=None):
+    lifecycle.transition_booking_status(db, db.get(Booking, booking_id or race.booking_id), race.admin, 'approved')
+
+
+def series(race, db):
+    return operations.create_series(db, BatchBookingCreate(catering_required=False, technical_support_required=False, 
+        room_ids=[r.id for r in race.rooms], date=DAY, date_end=DAY + timedelta(days=2),
+        time_start='14:00', time_end='16:00', title='Series test', participants=10,
+    ), race.user, status='pending', source='self_service')
+
+
+def room_set(race, db, *, extra_start=None):
+    request = payload(race).model_dump()
+    request['time_start'], request['time_end'] = '14:00', '16:00'
+    request['extra_rooms'] = [ExtraRoomRequest(room_id=race.rooms[1].id, purpose='Staff room',
+                                              time_start=extra_start, time_end='16:00' if extra_start else None)]
+    main = bookings.create_booking(db, BookingCreate(**request), race.user)
+    extra = db.scalar(select(Booking).where(Booking.parent_booking_id == main.id))
+    return main, extra
+
+
+def assert_pending_without_decision(race, ids):
+    with race.factory() as check:
+        items = check.scalars(select(Booking).where(Booking.id.in_(ids))).all()
+        assert len(items) == len(ids)
+        assert all(item.status == 'pending' and item.decision_at is None for item in items)
+        assert check.scalar(select(func.count()).select_from(BookingEvent).where(
+            BookingEvent.booking_id.in_(ids), BookingEvent.event_type.in_(['approved', 'rejected']))) == 0
+
+
+@pytest.mark.parametrize('changes,reason', [
+    ({'capacity': 9}, 'вмещает 9'),
+    ({'is_active': False}, 'недоступна'),
+    # The maximum (extra seating) is the hard limit; here it is still below the 10 requested.
+    ({'capacity': 5, 'max_capacity': 9}, 'вмещает 9'),
+])
+def test_current_room_conditions_override_cached_submission_conditions(race, changes, reason):
+    with race.factory() as decision, race.factory() as editor:
+        item = decision.get(Booking, race.booking_id)
+        cached_room = item.room
+        assert cached_room.capacity == 30 and cached_room.is_active
+        editor.execute(update(Room).where(Room.id == item.room_id).values(**changes)); editor.commit()
+        assert_denied(lambda: approve(race, decision), reason)
+        decision.rollback()
+    assert_pending_without_decision(race, [race.booking_id])
+
+
+def test_corrected_capacity_allows_later_approval(race):
+    with race.factory() as db:
+        db.execute(update(Room).where(Room.id == race.rooms[0].id).values(capacity=9)); db.commit()
+        assert_denied(lambda: approve(race, db), 'вмещает 9')
+        db.rollback()
+        db.execute(update(Room).where(Room.id == race.rooms[0].id).values(capacity=10)); db.commit()
+        approve(race, db)
+        assert db.get(Booking, race.booking_id).status == 'approved'
+
+
+@pytest.mark.parametrize('settings,reason', [
+    ({'work_hours_start': 11}, 'доступно с'),
+    ({'work_hours_end': 11}, 'доступно с'),
+    ({'slot_minutes': 90}, 'кратно 90'),
+    ({'min_booking_minutes': 180}, 'Продолжительность'),
+    ({'max_booking_minutes': 60}, 'Продолжительность'),
+])
+def test_approval_rechecks_current_hours_duration_and_slot(race, monkeypatch, settings, reason):
+    monkeypatch.setattr(bookings, 'settings', replace(bookings.settings, **settings))
+    with race.factory() as db:
+        assert_denied(lambda: approve(race, db), reason)
+    assert_pending_without_decision(race, [race.booking_id])
+
+
+@pytest.mark.parametrize('advance', [datetime(2030, 1, 14, 10, 30), datetime(2030, 1, 15, 9)])
+def test_clock_is_rechecked_after_waiting_for_room_lock(race, advance):
+    def advance_clock(conn, cursor, statement, parameters, context, executemany):
+        if 'pg_advisory_xact_lock' in statement:
+            race.clock.now = advance
+    event.listen(race.engine, 'before_cursor_execute', advance_clock)
+    try:
+        with race.factory() as db:
+            assert_denied(lambda: approve(race, db), 'прошедш')
+    finally:
+        event.remove(race.engine, 'before_cursor_execute', advance_clock)
+    assert_pending_without_decision(race, [race.booking_id])
+
+
+def test_rejection_does_not_require_room_to_still_be_bookable(race):
+    with race.factory() as db:
+        db.execute(update(Room).where(Room.id == race.rooms[0].id).values(capacity=1, is_active=False)); db.commit()
+        lifecycle.transition_booking_status(db, db.get(Booking, race.booking_id), race.admin, 'rejected', 'Аудитория отключена')
+        assert db.get(Booking, race.booking_id).status == 'rejected'
+
+
+@pytest.mark.parametrize('skip_conflicts', [False, True])
+@pytest.mark.parametrize('changes,reason', [({'capacity': 9}, 'вмещает 9'), ({'is_active': False}, 'недоступна')])
+def test_invalid_room_blocks_entire_series_before_any_decision(race, skip_conflicts, changes, reason):
+    with race.factory() as db:
+        items = series(race, db)
+        ids, series_id = [item.id for item in items], items[0].series_id
+        db.execute(update(Room).where(Room.id == race.rooms[1].id).values(**changes)); db.commit()
+        assert_denied(lambda: lifecycle.transition_series_status(db, series_id, race.admin, 'approved', skip_conflicts=skip_conflicts), reason)
+    assert_pending_without_decision(race, ids)
+
+
+def test_series_rechecks_current_time_policy(race, monkeypatch):
+    with race.factory() as db:
+        items = series(race, db)
+        ids, series_id = [item.id for item in items], items[0].series_id
+        monkeypatch.setattr(bookings, 'settings', replace(bookings.settings, work_hours_end=15))
+        assert_denied(lambda: lifecycle.transition_series_status(db, series_id, race.admin, 'approved'), 'доступно с')
+    assert_pending_without_decision(race, ids)
+
+
+@pytest.mark.parametrize('invalid', ['inactive_extra', 'invalid_extra_time', 'main_capacity'])
+def test_invalid_set_member_blocks_whole_set(race, monkeypatch, invalid):
+    with race.factory() as db:
+        main, extra = room_set(race, db, extra_start='08:00' if invalid == 'invalid_extra_time' else None)
+        ids = [main.id, extra.id]
+        if invalid == 'inactive_extra':
+            db.execute(update(Room).where(Room.id == extra.room_id).values(is_active=False)); db.commit()
+            reason = 'недоступна'
+        elif invalid == 'invalid_extra_time':
+            monkeypatch.setattr(bookings, 'settings', replace(bookings.settings, work_hours_start=9))
+            reason = 'доступно с'
+        else:
+            db.execute(update(Room).where(Room.id == main.room_id).values(capacity=9)); db.commit()
+            reason = 'вмещает 9'
+        assert_denied(lambda: approve(race, db, main.id), reason)
+    assert_pending_without_decision(race, ids)
+
+
+def test_extra_room_does_not_inherit_main_participant_count(race):
+    with race.factory() as db:
+        main, extra = room_set(race, db)
+        db.execute(update(Room).where(Room.id == extra.room_id).values(capacity=1)); db.commit()
+        approve(race, db, main.id)
+        assert main.status == 'approved' and extra.status == 'approved'
+        assert extra.participants is None
+
+
+def test_independent_extra_room_approval_is_validated_too(race):
+    with race.factory() as db:
+        main = bookings.create_booking(db, payload(race), race.admin)
+        extra = room_sets.create_extra_rooms(db, main, [ExtraRoomRequest(room_id=race.rooms[1].id, purpose='Staff room')], race.user, status='pending')[0]
+        db.commit()
+        db.execute(update(Room).where(Room.id == extra.room_id).values(is_active=False)); db.commit()
+        assert_denied(lambda: approve(race, db, extra.id), 'недоступна')
+        extra_id = extra.id
+    assert_pending_without_decision(race, [extra_id])
+
+
+def test_room_characteristics_are_share_locked_until_decision_finishes(race):
+    if not race.postgres:
+        pytest.skip('Requires PostgreSQL row locks')
+    with race.factory() as decision, race.factory() as editor:
+        validate_approval_conditions(decision, [decision.get(Booking, race.booking_id)])
+        with pytest.raises(OperationalError) as caught:
+            editor.execute(select(Room).where(Room.id == race.rooms[0].id).with_for_update(nowait=True))
+        assert caught.value.orig.sqlstate == '55P03'
+        editor.rollback()
+        decision.rollback()
+        editor.execute(select(Room).where(Room.id == race.rooms[0].id).with_for_update(nowait=True))
+
+
+def test_room_edit_in_progress_does_not_allow_approval_against_old_capacity(race):
+    if not race.postgres:
+        pytest.skip('Requires PostgreSQL row locks')
+    with race.factory() as decision, race.factory() as editor:
+        editor.execute(update(Room).where(Room.id == race.rooms[0].id).values(capacity=9))
+        assert_denied(lambda: approve(race, decision), 'сейчас изменяются')
+        editor.commit()
+        assert_denied(lambda: approve(race, decision), 'вмещает 9')
+    assert_pending_without_decision(race, [race.booking_id])

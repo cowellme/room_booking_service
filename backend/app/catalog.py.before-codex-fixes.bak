@@ -1,0 +1,34 @@
+import json
+from pathlib import Path
+from sqlalchemy import delete, select
+from .database import SessionLocal
+from .equipment import encode_equipment
+from .models import Booking, BookingHistory, Building, Room
+
+CATALOG_FILE = Path(__file__).with_name("catalog_data.json")
+
+def replace_catalog() -> tuple[int, int]:
+    data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    with SessionLocal() as db:
+        # The catalog file has no maximum capacity; keep what administrators entered by hand.
+        kept_max = {(name, number): value for name, number, value in db.execute(
+            select(Building.name, Room.number, Room.max_capacity).join(Room.building).where(Room.max_capacity.is_not(None)))}
+        db.execute(delete(BookingHistory))
+        db.execute(delete(Booking))
+        db.execute(delete(Room))
+        db.execute(delete(Building))
+        db.flush()
+        buildings = {}
+        for item in data["buildings"]:
+            building = Building(name=item["name"], address=item["address"], image=item["image"], color=item["color"])
+            db.add(building); db.flush(); buildings[item["code"]] = building
+        for item in data["rooms"]:
+            building = buildings[item["building_code"]]
+            db.add(Room(number=item["number"], name=item["name"], building=building,
+                        floor=item["floor"], floor_display=item["floor_display"], capacity=item["capacity"],
+                        max_capacity=item.get("max_capacity") or kept_max.get((building.name, item["number"])),
+                        area=item["area"], type=item["type"], equipment=encode_equipment(item["equipment"]),
+                        description=item["description"], usage_options=item["usage_options"],
+                        images=item["images"], floor_plan=item["floor_plan"], color=item["color"], is_active=True))
+        db.commit()
+    return len(data["buildings"]), len(data["rooms"])

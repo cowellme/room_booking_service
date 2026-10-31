@@ -1,0 +1,290 @@
+"""End-to-end rules of the request (заявка) workflow.
+
+Each test pins one rule or one previously found bug: creation, moderation,
+series, expiry, transfer, cancellation, visibility and notifications. The
+services run against an in-memory SQLite database; PostgreSQL advisory locks
+are replaced by a no-op function and the clock is fixed.
+"""
+from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app import main
+from app.models import Base, Booking, BookingEvent, Building, Department, Room, User
+from app.schemas import BatchBookingCreate, BookingCancelRequest, BookingCreate, BookingTransferRequest, ServiceBlockCreate
+from app.services import booking_lifecycle as lifecycle
+from app.services import bookings as bookings_service
+from app.services import operations
+
+# Monday 7 January 2030, 09:00 local time. Events are planned on later days.
+NOW = datetime(2030, 1, 7, 9, 0)
+DAY = date(2030, 1, 14)
+CANCEL = BookingCancelRequest(reason="Изменились планы", comment="Тест")
+
+
+@pytest.fixture
+def env(monkeypatch):
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    event.listen(engine, "connect", lambda conn, _: conn.create_function("pg_advisory_xact_lock", 1, lambda key: None))
+    Base.metadata.create_all(engine)
+    db = sessionmaker(engine, expire_on_commit=False)()
+    clock = SimpleNamespace(now=NOW)
+    for module in (lifecycle, bookings_service, main):
+        monkeypatch.setattr(module, "local_now", lambda: clock.now)
+    building = Building(name="Корпус 1")
+    db.add(building); db.flush()
+    rooms = [Room(number=str(100 + i), name=f"Ауд {i}", building_id=building.id, capacity=30, type="seminar") for i in (1, 2)]
+    users = {name: User(email=f"{name}@test.ru", full_name=name, password_hash="x", role="admin" if name == "admin" else "user")
+             for name in ("admin", "anna", "boris")}
+    db.add_all(rooms + list(users.values())); db.commit()
+    yield SimpleNamespace(db=db, clock=clock, rooms=rooms, **users)
+    db.close()
+
+
+def request(env, user, *, day=DAY, start="10:00", end="12:00", room=0, **extra):
+    payload = BookingCreate(room_id=env.rooms[room].id, date=day, time_start=start, time_end=end, title="Семинар",
+                            participants=10, **extra)
+    return bookings_service.create_booking(env.db, payload, user)
+
+
+def series(env, user, *, days=3, rooms=(0,), status=None, start="10:00", end="12:00"):
+    payload = BatchBookingCreate(room_ids=[env.rooms[i].id for i in rooms], date=DAY, date_end=DAY + timedelta(days=days - 1),
+                                 time_start=start, time_end=end, title="Курс", participants=10)
+    kwargs = {"status": "pending", "source": "self_service"} if user.role != "admin" else {}
+    return operations.create_series(env.db, payload, user, **kwargs)
+
+
+def statuses(items):
+    return [item.status for item in sorted(items, key=lambda item: item.date)]
+
+
+def expect(code, call, *args, **kwargs):
+    with pytest.raises(HTTPException) as exc:
+        call(*args, **kwargs)
+    assert exc.value.status_code == code
+    return exc.value.detail
+
+
+# --- Creating requests ---------------------------------------------------------
+
+def test_user_request_waits_for_moderation_and_admin_booking_is_confirmed(env):
+    assert request(env, env.anna).status == "pending"
+    assert request(env, env.admin, room=1).status == "approved"
+
+
+def test_confirmed_booking_blocks_the_slot(env):
+    request(env, env.admin)
+    expect(409, request, env, env.anna, start="11:00", end="13:00")
+
+
+def test_pending_request_does_not_block_other_users(env):
+    request(env, env.anna)
+    assert request(env, env.boris).status == "pending"
+
+
+def test_same_user_cannot_send_the_same_request_twice(env):
+    request(env, env.anna)
+    expect(409, request, env, env.anna, start="11:00", end="12:00")
+
+
+def test_capacity_is_checked(env):
+    payload = BookingCreate(room_id=env.rooms[0].id, date=DAY, time_start="10:00", time_end="12:00", title="Лекция", participants=31)
+    expect(400, bookings_service.create_booking, env.db, payload, env.anna)
+
+
+def test_typed_department_stays_private_and_profile_is_untouched(env):
+    item = request(env, env.anna, department_name="Кафедра опечаток")
+    department = env.db.get(Department, item.department_id)
+    assert department.name == "Кафедра опечаток" and not department.is_active
+    assert env.anna.department is None
+
+
+def test_user_series_size_is_limited(env):
+    payload = BatchBookingCreate(room_ids=[room.id for room in env.rooms], date=DAY, date_end=DAY + timedelta(days=120),
+                                 time_start="10:00", time_end="12:00", title="Курс")
+    expect(400, operations.create_series, env.db, payload, env.anna, status="pending", source="self_service")
+
+
+def test_series_cannot_be_created_over_a_taken_date(env):
+    request(env, env.admin, day=DAY + timedelta(days=1))
+    expect(409, series, env, env.anna)
+
+
+# --- Moderation ----------------------------------------------------------------
+
+def test_approval_rejects_competing_requests_at_once(env):
+    winner, loser = request(env, env.anna), request(env, env.boris, start="11:00", end="13:00")
+    lifecycle.transition_booking_status(env.db, winner, env.admin, "approved")
+    assert loser.status == "rejected"
+    assert loser.decision_reason == bookings_service.COMPETING_REJECT_REASON
+
+
+def test_admin_booking_and_service_block_reject_competing_requests(env):
+    first, second = request(env, env.anna), request(env, env.boris, room=1)
+    request(env, env.admin)
+    operations.create_service_blocks(env.db, ServiceBlockCreate(
+        room_ids=[env.rooms[1].id], date=DAY, date_end=DAY, time_start="08:00", time_end="22:00",
+        record_kind="maintenance", title="Ремонт", reason="Ремонт"), env.admin)
+    assert (first.status, second.status) == ("rejected", "rejected")
+
+
+def test_request_cannot_be_approved_after_its_start(env):
+    item = request(env, env.anna)
+    env.clock.now = datetime.combine(DAY, time(10, 30))
+    expect(409, lifecycle.transition_booking_status, env.db, item, env.admin, "approved")
+    assert item.status == "rejected"
+
+
+def test_rejection_needs_a_real_reason(env):
+    item = request(env, env.anna)
+    expect(400, lifecycle.transition_booking_status, env.db, item, env.admin, "rejected", "   ")
+    assert item.status == "pending"
+
+
+def test_series_is_approved_as_a_whole(env):
+    items = series(env, env.anna)
+    assert lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "approved") == 3
+    assert statuses(items) == ["approved"] * 3
+
+
+def test_series_with_a_busy_date_can_approve_only_free_dates(env):
+    items = series(env, env.anna)
+    busy = Booking(room_id=env.rooms[0].id, owner_id=env.admin.id, date=DAY + timedelta(days=1), time_start=time(9),
+                   time_end=time(11), title="Занято", status="approved", record_kind="booking", booked_by="admin", email="a")
+    env.db.add(busy); env.db.commit()
+    expect(409, lifecycle.transition_series_status, env.db, items[0].series_id, env.admin, "approved")
+    lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "approved", skip_conflicts=True)
+    assert statuses(items) == ["approved", "rejected", "approved"]
+
+
+def test_series_decision_skips_dates_that_have_started(env):
+    items = series(env, env.anna)
+    env.clock.now = datetime.combine(DAY, time(10, 30))
+    lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "approved")
+    assert statuses(items) == ["rejected", "approved", "approved"]
+
+
+def test_moderation_list_flags_competition_and_conflicts(env):
+    first, second = request(env, env.anna), request(env, env.boris)
+    listed = {item["id"]: item for item in main.moderation(env.admin, env.db)}
+    assert listed[first.id]["competing_requests"] == 1 and not listed[first.id]["has_conflict"]
+    expect(403, main.moderation, env.anna, env.db)
+
+
+# --- Expiry and completion -----------------------------------------------------
+
+def test_clock_closes_unreviewed_requests_and_completes_past_bookings(env):
+    pending, confirmed = request(env, env.anna), request(env, env.admin, room=1)
+    env.clock.now = datetime.combine(DAY, time(12, 30))
+    lifecycle.expire_pending_requests(env.db)
+    assert (pending.status, confirmed.status) == ("rejected", "completed")
+
+
+def test_series_expires_date_by_date(env):
+    items = series(env, env.anna)
+    env.clock.now = datetime.combine(DAY, time(10, 0))
+    lifecycle.expire_pending_requests(env.db)
+    assert statuses(items) == ["rejected", "pending", "pending"]
+
+
+def test_completion_marks_are_only_for_started_events(env):
+    item = request(env, env.admin)
+    expect(409, lifecycle.transition_booking_status, env.db, item, env.admin, "completed")
+    env.clock.now = datetime.combine(DAY, time(10, 30))
+    lifecycle.transition_booking_status(env.db, item, env.admin, "no_show")
+    assert item.status == "no_show"
+
+
+# --- Transfer ------------------------------------------------------------------
+
+@pytest.mark.parametrize(("author", "expected"), [("anna", "pending"), ("admin", "approved")])
+def test_transfer_keeps_moderation_state(env, author, expected):
+    original = request(env, getattr(env, author))
+    moved = operations.transfer_booking(env.db, original, BookingTransferRequest(
+        room_id=env.rooms[1].id, date=DAY + timedelta(days=1), time_start="10:00", time_end="12:00",
+        title="Семинар", reason="Перенос"), env.admin)
+    assert (original.status, moved.status) == ("transferred", expected)
+
+
+# --- Cancellation --------------------------------------------------------------
+
+def test_user_cancels_future_booking_but_not_a_started_one(env):
+    future, started = request(env, env.admin), request(env, env.admin, room=1)
+    for item in (future, started):
+        item.owner_id = env.anna.id
+    env.db.commit()
+    main.cancel_booking(future.id, CANCEL, env.anna, env.db)
+    env.clock.now = datetime.combine(DAY, time(10, 30))
+    expect(409, main.cancel_booking, started.id, CANCEL, env.anna, env.db)
+    assert (future.status, started.status) == ("cancelled_by_user", "approved")
+
+
+def test_user_cannot_cancel_someone_elses_booking(env):
+    item = request(env, env.boris)
+    expect(404, main.cancel_booking, item.id, CANCEL, env.anna, env.db)
+
+
+def test_series_cancel_is_whole_repeatable_and_owner_only(env):
+    items = series(env, env.anna)
+    expect(409, main.cancel_my_series, items[0].series_id, CANCEL, env.boris, env.db)
+    assert main.cancel_my_series(items[0].series_id, CANCEL, env.anna, env.db)["cancelled"] == 3
+    expect(409, main.cancel_my_series, items[0].series_id, CANCEL, env.anna, env.db)
+    assert statuses(items) == ["cancelled_by_user"] * 3
+
+
+def test_closed_booking_cannot_be_edited_or_cancelled_again(env):
+    item = request(env, env.anna)
+    lifecycle.cancel_booking_record(env.db, item, env.anna, reason="Тест", comment="Тест",
+                                    replacement_offered=False, notify_customer=False)
+    expect(409, lifecycle.cancel_booking_record, env.db, item, env.admin, reason="Тест", comment="Тест",
+           replacement_offered=False, notify_customer=False)
+
+
+# --- Calendar visibility -------------------------------------------------------
+
+def test_calendar_shows_confirmed_history_and_only_own_pending_requests(env):
+    own, other = request(env, env.anna), request(env, env.boris, room=1)
+    past = request(env, env.admin, start="14:00", end="15:00")
+    env.clock.now = datetime.combine(DAY, time(15, 30))
+    request(env, env.admin, day=DAY + timedelta(days=1))
+    env.clock.now = datetime.combine(DAY, time(9, 0))
+    visible = {item["id"] for item in main.bookings(DAY, DAY + timedelta(days=1), None, env.anna, env.db)}
+    assert own.id in visible and past.id in visible and other.id not in visible
+    admin_view = {item["id"] for item in main.bookings(DAY, DAY, None, env.admin, env.db)}
+    assert own.id not in admin_view and past.id in admin_view
+
+
+# --- Notifications -------------------------------------------------------------
+
+def last_event_id(env):
+    return env.db.scalar(select(func.max(BookingEvent.id))) or 0
+
+
+def test_series_decision_is_one_notification(env):
+    items = series(env, env.anna, days=5)
+    cursor = last_event_id(env)
+    lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "approved")
+    notes = main.my_notifications(cursor, env.anna, env.db)
+    assert len(notes) == 1 and notes[0]["series_count"] == 5 and notes[0]["type"] == "approved"
+
+
+def test_notifications_after_cursor_have_no_gaps(env):
+    items = [request(env, env.anna, day=DAY + timedelta(days=i // 6), start=f"{8 + 2 * (i % 6):02d}:00",
+                     end=f"{9 + 2 * (i % 6):02d}:00") for i in range(40)]
+    cursor = last_event_id(env)
+    for item in items:
+        lifecycle.transition_booking_status(env.db, item, env.admin, "rejected", "Нет мест")
+    notes = main.my_notifications(cursor, env.anna, env.db)
+    assert [note["booking_id"] for note in notes] == [item.id for item in items]
+
+
+def test_own_actions_are_not_notified(env):
+    item = request(env, env.anna)
+    cursor = last_event_id(env)
+    main.cancel_booking(item.id, CANCEL, env.anna, env.db)
+    assert main.my_notifications(cursor, env.anna, env.db) == []

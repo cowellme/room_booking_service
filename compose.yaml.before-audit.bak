@@ -1,0 +1,91 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-room_booking}
+      POSTGRES_USER: ${POSTGRES_USER:-room_booking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-room_booking} -d ${POSTGRES_DB:-room_booking}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+      TZ: ${APP_TIMEZONE:-Europe/Moscow}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Moscow}
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
+      WORK_HOURS_START: ${WORK_HOURS_START:-8}
+      WORK_HOURS_END: ${WORK_HOURS_END:-22}
+      TIME_SLOT_MINUTES: ${TIME_SLOT_MINUTES:-30}
+      MIN_BOOKING_MINUTES: ${MIN_BOOKING_MINUTES:-30}
+      MAX_BOOKING_MINUTES: ${MAX_BOOKING_MINUTES:-840}
+      LIFECYCLE_WORKER_ENABLED: ${LIFECYCLE_WORKER_ENABLED:-true}
+      LIFECYCLE_INTERVAL_SECONDS: ${LIFECYCLE_INTERVAL_SECONDS:-30}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
+      EMAIL_MODE: ${EMAIL_MODE:-}
+      SMTP_HOST: ${SMTP_HOST:-smtp.yandex.ru}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURITY: ${SMTP_SECURITY:-ssl}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      EMAIL_CODE_TTL_MINUTES: ${EMAIL_CODE_TTL_MINUTES:-15}
+      EMAIL_CODE_RESEND_SECONDS: ${EMAIL_CODE_RESEND_SECONDS:-60}
+      EMAIL_CODE_MAX_PER_HOUR: ${EMAIL_CODE_MAX_PER_HOUR:-6}
+      EMAIL_CODE_MAX_ATTEMPTS: ${EMAIL_CODE_MAX_ATTEMPTS:-5}
+      LOGIN_MAX_FAILURES: ${LOGIN_MAX_FAILURES:-5}
+      LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-1}
+      LOGIN_LOCK_MAX_MINUTES: ${LOGIN_LOCK_MAX_MINUTES:-15}
+      LOGIN_FAILURE_WINDOW_MINUTES: ${LOGIN_FAILURE_WINDOW_MINUTES:-30}
+      LOGIN_IP_MAX_FAILURES: ${LOGIN_IP_MAX_FAILURES:-300}
+      EMAIL_IP_MAX_CODES_PER_HOUR: ${EMAIL_IP_MAX_CODES_PER_HOUR:-300}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backup:
+    image: postgres:16-alpine
+    profiles: ["ops"]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["sh", "-c"]
+    command: ["pg_dump -h db -U ${POSTGRES_USER:-room_booking} -d ${POSTGRES_DB:-room_booking} -Fc -f /backups/room_booking_$$(date +%Y%m%d_%H%M%S).dump"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
