@@ -38,8 +38,8 @@ def test_early_completion_does_not_change_status_or_history(race, now):
         assert check.get(Booking, item_id).status == 'approved'
 
 
-@pytest.mark.parametrize('now', [datetime(2030, 1, 14, 12), datetime(2030, 1, 14, 12, 0, 1), datetime(2030, 1, 15, 0)])
-def test_completion_is_allowed_at_or_after_scheduled_end(race, now):
+@pytest.mark.parametrize('now', [datetime(2030, 1, 15, 0), datetime(2030, 1, 15, 12)])
+def test_completion_is_allowed_after_scheduled_date(race, now):
     with race.factory() as db:
         item = approved(race, db)
         race.clock.now = now
@@ -59,7 +59,7 @@ def test_failed_early_completion_keeps_availability_and_both_calendars_correct(r
         assert conflict.id == item.id
         for actor in (race.admin, race.user):
             calendar = main.bookings(DAY, DAY, user=actor, db=db)
-            assert any(row['id'] == item.id and row['status'] == 'approved' for row in calendar)
+            assert any(row['room_id'] == item.room_id and row['status'] == 'approved' for row in calendar)
         availability = build_availability(db, AvailabilityRequest(date=DAY, time_start='11:00', time_end='12:00', participants=1))
         assert any(room['id'] == item.room_id for room in availability['occupied'])
         assert all(room['id'] != item.room_id for room in availability['free'])
@@ -67,10 +67,7 @@ def test_failed_early_completion_keeps_availability_and_both_calendars_correct(r
         from app.schemas import BookingCreate
         with pytest.raises(HTTPException) as caught:
             bookings.create_booking(db, BookingCreate(**data), race.user)
-        # Same-day creation is now rejected by the seven-working-day rule first.
-        # The find_conflict/availability assertions above still verify occupancy.
-        assert caught.value.status_code == 400
-        assert '7 рабочих дней' in caught.value.detail
+        assert caught.value.status_code == 409
 
 
 def test_no_show_can_still_be_recorded_after_start_but_not_completed_early(race):
@@ -82,7 +79,7 @@ def test_no_show_can_still_be_recorded_after_start_but_not_completed_early(race)
         with pytest.raises(HTTPException) as caught:
             lifecycle.transition_booking_status(db, item, race.admin, 'completed')
         assert caught.value.status_code == 409 and item.status == 'no_show'
-        race.clock.now = datetime(2030, 1, 14, 12)
+        race.clock.now = datetime(2030, 1, 15, 0)
         lifecycle.transition_booking_status(db, item, race.admin, 'completed')
         assert item.status == 'completed'
 
@@ -95,18 +92,20 @@ def test_no_show_before_start_remains_forbidden(race):
         assert caught.value.status_code == 409 and item.status == 'approved'
 
 
-def test_automatic_completion_still_waits_until_end_and_retains_calendar_history(race):
+def test_automatic_completion_happens_after_date_without_timeline_event(race):
     with race.factory() as db:
         item = approved(race, db)
-        race.clock.now = datetime(2030, 1, 14, 11, 59, 59)
-        lifecycle.expire_pending_requests(db)
+        race.clock.now = datetime(2030, 1, 14, 23, 59, 59)
+        lifecycle.complete_finished_bookings(db)
         assert item.status == 'approved'
-        race.clock.now = datetime(2030, 1, 14, 12)
-        lifecycle.expire_pending_requests(db)
+        race.clock.now = datetime(2030, 1, 15, 0)
+        lifecycle.complete_finished_bookings(db)
         assert item.status == 'completed'
-        lifecycle.expire_pending_requests(db)
+        lifecycle.complete_finished_bookings(db)
         assert db.scalar(select(func.count()).select_from(BookingEvent).where(
-            BookingEvent.booking_id == item.id, BookingEvent.event_type == 'completed')) == 1
+            BookingEvent.booking_id == item.id, BookingEvent.event_type == 'completed')) == 0
         for actor in (race.admin, race.user):
-            assert any(row['id'] == item.id and row['status'] == 'completed'
-                       for row in main.bookings(DAY, DAY, user=actor, db=db))
+            rows = main.bookings(DAY, DAY, user=actor, db=db)
+            assert any(row['room_id'] == item.room_id and (
+                row['status'] == 'completed' if actor.role == 'admin' else row.get('restricted')
+            ) for row in rows)

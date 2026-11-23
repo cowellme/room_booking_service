@@ -14,7 +14,6 @@ from ..timeutils import local_now, utc_now
 from .bookings import find_conflict, record_event, reject_competing_requests
 from .booking_locks import lock_booking_record, lock_booking_rows
 from .approval_validation import validate_approval_conditions
-from .work_calendar import review_info
 
 
 CLOSED_BOOKING_STATUSES = frozenset({
@@ -23,50 +22,30 @@ CLOSED_BOOKING_STATUSES = frozenset({
 })
 
 
-def expire_pending_requests(db: Session) -> int:
+def complete_finished_bookings(db: Session) -> int:
     """Bring records in line with the clock in a dedicated worker transaction.
 
-    Unreviewed requests expire after seven working days (or event start).
+    Pending requests remain available for manual review, including past dates.
     Confirmed bookings whose time has passed are
     marked as completed, so the lists do not keep stale "confirmed" records.
     """
     local = local_now()
     today, current = local.date(), local.time()
     now = utc_now()
-    finished = or_(Booking.date < today, and_(Booking.date == today, Booking.time_end <= current))
-    expired = list(db.scalars(select(Booking).options(joinedload(Booking.owner)).where(
-        Booking.status == "pending",
-    ).with_for_update(of=Booking, skip_locked=True).execution_options(populate_existing=True)))
-    for booking in expired:
-        deadline = review_info(booking.created_at, local)
-        if not deadline.get("review_overdue") and not event_started(booking):
-            continue
-        booking.status = "rejected"
-        booking.archived_at = now
-        booking.archived_by_id = None
-        booking.updated_at = now
-        booking.decision_at = now
-        booking.decision_reason = "Не подтверждена: истёк срок рассмотрения заявки"
-        booking.hold_expires_at = None
-        record_event(
-            db, booking, booking.owner, "expired", booking.decision_reason,
-            {"system": True, "previous_status": "pending"},
-        )
+    finished = Booking.date < today
     completed = list(db.scalars(select(Booking).options(joinedload(Booking.owner)).where(
         Booking.status == "approved", Booking.record_kind == "booking", finished,
     ).with_for_update(of=Booking, skip_locked=True).execution_options(populate_existing=True)))
     for booking in completed:
         booking.status = "completed"
         booking.updated_at = now
-        record_event(
-            db, booking, booking.owner, "completed", "Мероприятие завершено",
-            {"system": True, "previous_status": "approved"},
-        )
-    if any(booking.status == "rejected" for booking in expired) or completed:
+
+    if completed:
         db.commit()
-    return sum(booking.status == "rejected" for booking in expired)
+    return len(completed)
 
 STATUS_SUMMARIES = {
+    "in_progress": "Заявка принята в работу",
     "approved": "Бронирование подтверждено",
     "rejected": "Заявка отклонена",
     "completed": "Мероприятие состоялось",
@@ -74,7 +53,8 @@ STATUS_SUMMARIES = {
 }
 
 ALLOWED_STATUS_TRANSITIONS = {
-    "pending": {"approved", "rejected"},
+    "pending": {"in_progress", "approved", "rejected"},
+    "in_progress": {"approved", "rejected"},
     "approved": {"completed", "no_show"},
     # Past bookings are completed automatically; the administrator can still correct the outcome.
     "completed": {"no_show"},
@@ -84,12 +64,12 @@ ALLOWED_STATUS_TRANSITIONS = {
 
 def event_started(booking: Booking) -> bool:
     now = local_now()
-    return booking.date < now.date() or (booking.date == now.date() and booking.time_start <= now.time())
+    return booking.date <= now.date()
 
 
 def event_finished(booking: Booking) -> bool:
     now = local_now()
-    return booking.date < now.date() or (booking.date == now.date() and booking.time_end <= now.time())
+    return booking.date < now.date()
 
 
 def get_booking_or_404(db: Session, booking_id: int) -> Booking:
@@ -116,7 +96,7 @@ def cancel_booking_record(
 ) -> None:
     booking = lock_booking_record(db, booking)
     ensure_booking_open(booking)
-    if actor.role != "admin" and event_started(booking):
+    if actor.role != "admin" and booking.status != "pending" and event_started(booking):
         raise HTTPException(409, "Мероприятие уже началось — отменить его нельзя")
     _apply_cancellation(db, booking, actor, reason=reason, comment=comment,
                         replacement_offered=replacement_offered, notify_customer=notify_customer)
@@ -124,7 +104,7 @@ def cancel_booking_record(
     if not booking.parent_booking_id:
         from .room_sets import extra_rooms_of
         for extra in extra_rooms_of(db, booking, open_only=True):
-            if actor.role == "admin" or not event_started(extra):
+            if actor.role == "admin" or extra.status == "pending" or not event_started(extra):
                 _apply_cancellation(db, extra, actor, reason=reason, comment=comment,
                                     replacement_offered=replacement_offered, notify_customer=notify_customer)
     db.commit()
@@ -171,7 +151,7 @@ def cancel_series_records(
     if actor.role != "admin":
         stmt = stmt.where(Booking.owner_id == actor.id)
     items = [item for item in lock_booking_rows(db, stmt.order_by(Booking.id))
-             if actor.role == "admin" or not event_started(item)]
+             if actor.role == "admin" or item.status == "pending" or not event_started(item)]
     if not items:
         raise HTTPException(409, "В серии не осталось дат, которые можно отменить")
     for item in items:
@@ -183,7 +163,9 @@ def cancel_series_records(
 
 def set_booking_archived(db: Session, booking: Booking, actor: User, archived: bool, *, commit: bool = True) -> None:
     now = local_now()
-    event_finished = booking.date < now.date() or (booking.date == now.date() and booking.time_end <= now.time())
+    event_finished = booking.date < now.date()
+    if archived and booking.status in {"pending", "in_progress"}:
+        raise HTTPException(409, "Сначала рассмотрите или отмените заявку")
     if archived and booking.status not in CLOSED_BOOKING_STATUSES and not event_finished:
         raise HTTPException(409, "В архив можно переносить только завершённые, отменённые или прошедшие бронирования")
     booking.archived_at = utc_now() if archived else None
@@ -295,8 +277,6 @@ def transition_booking_status(
     booking = lock_booking_record(db, booking)
     if status not in ALLOWED_STATUS_TRANSITIONS.get(booking.status, set()):
         raise HTTPException(409, "Недопустимый переход статуса бронирования")
-    if booking.status == "pending" and review_info(booking.created_at, local_now()).get("review_overdue"):
-        raise HTTPException(409, "Срок рассмотрения заявки истёк. Заявка будет перенесена в архив")
     if status == "completed" and not event_finished(booking):
         raise HTTPException(409, "Отметить «Состоялось» можно только после планового окончания мероприятия")
     if status == "no_show" and not event_started(booking):
@@ -315,13 +295,13 @@ def transition_booking_status(
         raise HTTPException(400, "Укажите причину отказа")
     from .room_sets import decide_extra_rooms, ensure_extra_can_be_approved_alone, ensure_set_can_be_approved, extra_rooms_of
     set_extras = []
-    if previous_is_pending := booking.status == "pending":
+    if previous_is_review := booking.status in {"pending", "in_progress"}:
         if status == "approved" and booking.parent_booking_id:
             ensure_extra_can_be_approved_alone(db, booking)
         if not booking.parent_booking_id and status == "approved":
             set_extras = ensure_set_can_be_approved(db, booking)
-        elif not booking.parent_booking_id and status == "rejected":
-            set_extras = [item for item in extra_rooms_of(db, booking) if item.status == "pending"]
+        elif not booking.parent_booking_id and status in {"rejected", "in_progress"}:
+            set_extras = [item for item in extra_rooms_of(db, booking) if item.status in {"pending", "in_progress"} and item.status != status]
     if status == "approved":
         validate_approval_conditions(db, [booking, *set_extras])
     previous = booking.status
@@ -338,7 +318,7 @@ def transition_booking_status(
     )
     if status == "approved":
         reject_competing_requests(db, booking, actor)
-    if previous_is_pending and set_extras:
+    if previous_is_review and set_extras:
         decide_extra_rooms(db, set_extras, actor, status, reason, booking)
     db.commit()
 
@@ -355,32 +335,28 @@ def transition_series_status(
     With `skip_conflicts` the free dates are approved and the busy ones are
     rejected, so one taken date does not block the whole series.
     """
-    if status not in {"approved", "rejected"}:
-        raise HTTPException(400, "Для серии доступно только подтверждение или отказ")
+    if status not in {"in_progress", "approved", "rejected"}:
+        raise HTTPException(400, "Для серии доступно принятие в работу, подтверждение или отказ")
     if status == "rejected" and not (reason and reason.strip()):
         raise HTTPException(400, "Укажите причину отказа")
     items = lock_booking_rows(db, select(Booking).options(joinedload(Booking.room)).where(
-        Booking.series_id == series_id, Booking.status == "pending",
+        Booking.series_id == series_id,
+        Booking.status.in_(("pending",) if status == "in_progress" else ("pending", "in_progress")),
     ).order_by(Booking.date, Booking.time_start, Booking.id))
     if not items:
         raise HTTPException(404, "В серии нет заявок, ожидающих решения")
-    if any(review_info(item.created_at, local_now()).get("review_overdue") for item in items):
-        raise HTTPException(409, "Срок рассмотрения серии истёк. Заявки будут перенесены в архив")
-    if status == "approved":
-        # The periodic worker owns automatic expiry. Decide only future dates;
-        # do not change unrelated/past requests as a side effect of this command.
-        items = [item for item in items if not event_started(item)]
-        if not items:
-            raise HTTPException(409, "Время всех мероприятий серии уже наступило — подтвердить их нельзя")
     busy: list[Booking] = []
     if status == "approved":
         problems = []
-        for booking in items:
+        for booking in sorted(items, key=lambda item: (item.date, item.room_id, item.id)):
             lock_key = booking.date.toordinal() * 100000 + booking.room_id
             db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
             if find_conflict(db, booking.room_id, booking.date, booking.time_start, booking.time_end, booking.id):
                 busy.append(booking)
                 problems.append(f"{booking.date.strftime('%d.%m.%Y')}, ауд. {booking.room.number}")
+        if busy:
+            blocked_sets = {booking.parent_booking_id or booking.id for booking in busy}
+            busy = [booking for booking in items if (booking.parent_booking_id or booking.id) in blocked_sets]
         # Skipping occupied dates never bypasses current room/time/capacity rules.
         validate_approval_conditions(db, items)
         if busy and skip_conflicts and len(busy) < len(items):
@@ -391,17 +367,19 @@ def transition_series_status(
     now = utc_now()
     busy_ids = {booking.id for booking in busy}
     for booking in items:
+        previous = booking.status
         item_status = "rejected" if booking.id in busy_ids else status
         item_reason = SERIES_DATE_BUSY_REASON if booking.id in busy_ids else reason
         booking.status = item_status
         booking.updated_at = now
-        booking.decision_at = now
-        booking.decided_by_id = actor.id
-        booking.decision_reason = item_reason.strip() if item_reason else None
-        booking.hold_expires_at = None
+        if item_status in {"approved", "rejected"}:
+            booking.decision_at = now
+            booking.decided_by_id = actor.id
+            booking.decision_reason = item_reason.strip() if item_reason else None
+            booking.hold_expires_at = None
         record_event(
             db, booking, actor, item_status, STATUS_SUMMARIES[item_status],
-            {"previous_status": "pending", "reason": item_reason, "series_id": series_id},
+            {"previous_status": previous, "reason": item_reason, "series_id": series_id},
         )
     if status == "approved":
         db.flush()

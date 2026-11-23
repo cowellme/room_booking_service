@@ -198,12 +198,12 @@ def test_alternatives_include_rooms_of_another_building(env):
     assert "другой корпус" in found["alternatives"][0]["alternative_reason"]
 
 
-def test_nearest_booking_is_the_one_closest_to_the_requested_time(env):
+def test_availability_only_blocks_the_overlapping_time_window(env):
     book(env, env.admin, start="08:00", end="09:00")
-    book(env, env.admin, start="15:00", end="16:00")
-    found = availability.build_availability(env.db, AvailabilityRequest(date=DAY, time_start="12:00", time_end="14:00"))
-    room = next(room for room in found["free"] if room["number"] == "101")
-    assert room["nearest_booking"]["time_start"] == "15:00"
+    free = availability.build_availability(env.db, AvailabilityRequest(date=DAY, time_start="12:00", time_end="14:00"))
+    occupied = availability.build_availability(env.db, AvailabilityRequest(date=DAY, time_start="08:30", time_end="09:30"))
+    assert "101" in {room["number"] for room in free["free"]}
+    assert "101" in {room["number"] for room in occupied["occupied"]}
 
 
 # --- М3 / М4: bulk archive and delete --------------------------------------------------
@@ -226,7 +226,7 @@ def test_archiving_several_records_is_all_or_nothing(env):
     future = book(env, env.admin, day=DAY + timedelta(days=1))
     env.db.commit()
     main_clock = lifecycle.local_now
-    lifecycle.local_now = lambda: datetime(2030, 1, 14, 13, 0)
+    lifecycle.local_now = lambda: datetime(2030, 1, 15, 13, 0)
     try:
         expect(409, lifecycle.set_bookings_archived, env.db, [past.id, future.id], env.admin, True)
         env.db.rollback()
@@ -238,5 +238,5 @@ def test_archiving_several_records_is_all_or_nothing(env):
 
 # --- М11: booking horizon ------------------------------------------------------------
 
-def test_booking_too_far_ahead_is_rejected(env):
-    expect(400, book, env, env.anna, day=NOW.date() + timedelta(days=800))
+def test_booking_has_no_fixed_future_horizon(env):
+    assert book(env, env.anna, day=NOW.date() + timedelta(days=800)).status == "pending"

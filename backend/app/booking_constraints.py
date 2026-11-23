@@ -3,7 +3,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 
 BOOKING_OVERLAP_CONSTRAINT = "ex_booking_room_time_approved"
-BOOKING_OVERLAP_MESSAGE = "Аудитория уже занята в выбранное время. Обновите данные и выберите другой интервал"
+BOOKING_OVERLAP_MESSAGE = "Аудитория уже занята на выбранную дату. Обновите данные и выберите другую дату"
 
 
 def booking_overlap_constraint():

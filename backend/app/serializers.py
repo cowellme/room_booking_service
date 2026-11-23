@@ -1,7 +1,6 @@
 from .models import Booking, Room
 from .equipment import equipment_items
-from .services.work_calendar import review_info
-from .timeutils import local_now
+from .booking_notice import is_short_notice
 
 
 def room_to_dict(room: Room) -> dict:
@@ -16,19 +15,24 @@ def room_to_dict(room: Room) -> dict:
     }
 
 
-def booking_to_dict(item: Booking, include_events: bool = False) -> dict:
+def booking_to_dict(item: Booking, include_events: bool = False, *, include_admin_notice: bool = False) -> dict:
     result = {
         "id": item.id, "room_id": item.room_id, "room_number": item.room.number,
         "room_name": item.room.name, "building": item.room.building.name,
         "building_id": item.room.building_id,
         "date": item.date.isoformat(), "time_start": item.time_start.strftime("%H:%M"),
         "time_end": item.time_end.strftime("%H:%M"), "title": item.title,
+        "event_format": getattr(item, "event_format", "Другое"),
         "type": item.booking_type, "booking_type": item.booking_type, "group_name": item.group_name,
         "teacher": item.teacher, "booked_by": item.booked_by,
         "status": item.status, "color": item.room.building.color, "owner_id": item.owner_id,
         "comment": item.comment, "requested_equipment": item.requested_equipment or [],
         "catering_required": item.catering_required,
         "technical_support_required": item.technical_support_required,
+        "event_location": item.event_location,
+        "catering_storage_required": item.catering_storage_required,
+        "operations_hq_required": item.operations_hq_required,
+        "vip_room_required": item.vip_room_required,
         "source": item.source, "customer_name": item.customer_name or item.booked_by,
         "customer_contact": item.customer_contact if item.source == "phone" else (item.customer_contact or item.email),
         "participants": item.participants,
@@ -64,14 +68,15 @@ def booking_to_dict(item: Booking, include_events: bool = False) -> dict:
         "decision_reason": item.decision_reason,
     }
     result["review_expired"] = bool(item.archived_at and item.status == "rejected" and item.decision_reason == "Не подтверждена: истёк срок рассмотрения заявки")
-    if item.status == "pending":
-        result.update(review_info(item.created_at, local_now()))
+    if include_admin_notice:
+        result["short_notice"] = item.record_kind == "booking" and is_short_notice(item.created_at, item.date)
     if include_events:
         result["events"] = [{
-            "id": event.id, "type": event.event_type, "summary": event.summary,
+            "id": event.id, "type": event.event_type,
+            "summary": event.summary,
             "data": event.data or {}, "actor": "Система" if (event.data or {}).get("system") else (event.actor.full_name if event.actor else "Система"),
             "created_at": event.created_at.isoformat() if event.created_at else None,
-        } for event in item.events]
+        } for event in item.events if not (event.event_type == "completed" and (event.data or {}).get("system"))]
         result["comments"] = [{
             "id": comment.id, "text": comment.text,
             "author": comment.author.full_name,
@@ -79,6 +84,10 @@ def booking_to_dict(item: Booking, include_events: bool = False) -> dict:
             "resolved_at": comment.resolved_at.isoformat() if comment.resolved_at else None,
             "resolved_by": comment.resolved_by.full_name if comment.resolved_by else None,
         } for comment in item.comments]
+        result["observers"] = [{
+            "id": observer.user.id, "full_name": observer.user.full_name,
+            "email": observer.user.email, "avatar_url": observer.user.avatar_url,
+        } for observer in item.observers]
     return result
 
 
@@ -90,7 +99,7 @@ def calendar_booking_to_dict(item: Booking, *, include_private: bool = False, in
     Administrators may receive the regular full payload.
     """
     if include_private:
-        return booking_to_dict(item)
+        return booking_to_dict(item, include_admin_notice=True)
     return {
         "id": item.id,
         "room_id": item.room_id,
@@ -102,6 +111,7 @@ def calendar_booking_to_dict(item: Booking, *, include_private: bool = False, in
         "time_start": item.time_start.strftime("%H:%M"),
         "time_end": item.time_end.strftime("%H:%M"),
         "title": item.title,
+        "event_format": getattr(item, "event_format", "Другое"),
         "booking_type": item.booking_type,
         "record_kind": item.record_kind,
         "status": item.status,

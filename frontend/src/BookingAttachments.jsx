@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, FileText, Image as ImageIcon, Paperclip, Trash2, X } from "lucide-react";
 import "./attachments.css";
 
@@ -50,19 +50,55 @@ export async function uploadAttachments(request, target, files) {
 export const uploadFailureNotice = (failed) =>
   failed.length ? ` Не удалось прикрепить файлы: ${failed.join("; ")}` : "";
 
+export function submitRequestWithFile(request, booking, file, series=false) {
+  if(!file)throw new Error('Прикрепите файл с обоснованием заявки');
+  const metadata=new TextEncoder().encode(JSON.stringify({booking,name:encodeURIComponent(file.name)}));
+  const length=new Uint8Array(4);
+  new DataView(length.buffer).setUint32(0,metadata.length);
+  return request('/api/me/request-with-file'+(series?'?series=true':''),{
+    method:'POST',headers:{'Content-Type':'application/octet-stream'},
+    body:new Blob([length,metadata,file]),
+  });
+}
+
+export function FileReplacementHistory({entries}) {
+  const changes=[...new Map(entries.flatMap(item=>item.file_replacements||[]).map(event=>[event.replacement_id||event.id,event])).values()]
+    .sort((a,b)=>a.at.localeCompare(b.at));
+  if(!changes.length)return null;
+  return <details className="attachment-box compact"><summary>Путь заявки</summary><ul>
+    {changes.map(event=><li key={event.id}><b>Файл заменён</b> · {event.actor||'Сотрудник'} · <time dateTime={event.at}>{new Date(event.at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',hour12:false})}</time><br/>{event.before} → {event.after}</li>)}
+  </ul></details>;
+}
+
 function FileIcon({ name }) {
   return IMAGE_EXTENSIONS.includes(extensionOf(name)) ? <ImageIcon /> : <FileText />;
 }
 
+const previewType=(name)=>IMAGE_EXTENSIONS.includes(extensionOf(name))?'image':extensionOf(name)==='pdf'?'pdf':null;
+function StoredPreview({item}) {
+  const type=previewType(item.name);
+  if(!type)return <span className="attachment-preview fallback"><FileIcon name={item.name}/></span>;
+  const url=item.url+(item.url.includes('?')?'&':'?')+'preview=1';
+  return <a className="attachment-preview" href={item.url} target="_blank" rel="noopener" aria-label={`Открыть ${item.name}`}>
+    {type==='image'?<img src={url} alt={`Предпросмотр ${item.name}`} loading="lazy"/>:<iframe src={`${url}#page=1&view=FitH&toolbar=0&navpanes=0`} title={`Первая страница ${item.name}`} loading="lazy" tabIndex="-1"/>}
+  </a>;
+}
+function LocalPreview({file}) {
+  const type=previewType(file.name);const [url,setUrl]=useState('');
+  useEffect(()=>{if(!type)return;const value=URL.createObjectURL(file);setUrl(value);return()=>URL.revokeObjectURL(value)},[file,type]);
+  if(!type||!url)return <span className="attachment-preview fallback"><FileIcon name={file.name}/></span>;
+  return <span className="attachment-preview">{type==='image'?<img src={url} alt={`Предпросмотр ${file.name}`}/>:<iframe src={`${url}#page=1&view=FitH&toolbar=0&navpanes=0`} title={`Первая страница ${file.name}`} tabIndex="-1"/>}</span>;
+}
+
 // File chooser for the booking forms. Files are kept in the form until it is sent.
-export function AttachmentPicker({ files, onChange, className = "full", hint }) {
+export function AttachmentPicker({ files, onChange, className = "full", hint, single=false }) {
   const inputRef = useRef(null);
   const [error, setError] = useState("");
   const add = (list) => {
     const chosen = [...list];
     const problems = chosen.map((file) => [file, fileProblem(file)]).filter(([, problem]) => problem);
     const good = chosen.filter((file) => !fileProblem(file) && !files.some((f) => f.name === file.name && f.size === file.size));
-    const next = [...files, ...good].slice(0, MAX_ATTACHMENTS);
+    const next = single ? (good.length ? good.slice(0,1) : files) : [...files, ...good].slice(0, MAX_ATTACHMENTS);
     const messages = problems.map(([file, problem]) => `${file.name} — ${problem}`);
     if (files.length + good.length > MAX_ATTACHMENTS) messages.push(`можно прикрепить не более ${MAX_ATTACHMENTS} файлов`);
     setError(messages.join("; "));
@@ -70,7 +106,7 @@ export function AttachmentPicker({ files, onChange, className = "full", hint }) 
   };
   return (
     <div className={`${className} attachment-picker`}>
-      <span>Файлы к заявке</span>
+      <span>{single?'Файл к заявке *':'Файлы к заявке'}</span>
       <div
         className="attachment-drop"
         onDragOver={(event) => event.preventDefault()}
@@ -81,13 +117,13 @@ export function AttachmentPicker({ files, onChange, className = "full", hint }) 
       >
         <button type="button" className="secondary" onClick={() => inputRef.current?.click()}>
           <Paperclip />
-          Прикрепить файлы
+          {single?'Прикрепить файл':'Прикрепить файлы'}
         </button>
-        <small>{hint || "Программа, список участников, схема рассадки и т. п. До 10 файлов, каждый до 20 МБ."}</small>
+        <small>{hint || (single?'Приложите обоснование заявки. Один файл до 20 МБ.':'Программа, список участников, схема рассадки и т. п. До 10 файлов, каждый до 20 МБ.')}</small>
         <input
           ref={inputRef}
           type="file"
-          multiple
+          multiple={!single}
           accept={ACCEPT}
           hidden
           onChange={(event) => {
@@ -97,10 +133,10 @@ export function AttachmentPicker({ files, onChange, className = "full", hint }) 
         />
       </div>
       {files.length > 0 && (
-        <ul className="attachment-list">
+        <ul className="attachment-list attachment-gallery">
           {files.map((file, index) => (
             <li key={`${file.name}-${file.size}-${index}`}>
-              <FileIcon name={file.name} />
+              <LocalPreview file={file}/>
               <span>
                 <b title={file.name}>{file.name}</b>
                 <small>{formatFileSize(file.size)}</small>
@@ -123,8 +159,10 @@ export function AttachmentPicker({ files, onChange, className = "full", hint }) 
 }
 
 // Files of a booking or request card: open in a new tab, download, and (optionally) add or delete.
-export function AttachmentList({ items = [], request, user, uploadTarget, onChanged, title = "Файлы", compact = false }) {
+export function AttachmentList({ items = [], request, user, uploadTarget, onChanged, title = "Файлы", compact = false, replace=false }) {
   const inputRef = useRef(null);
+  const replacementRef = useRef(null);
+  const replacementId = useRef(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   if (!items.length && !uploadTarget) return null;
@@ -148,7 +186,17 @@ export function AttachmentList({ items = [], request, user, uploadTarget, onChan
       setError(failure.message);
     }
   };
-  const canDelete = (item) => user && (user.role === "admin" || item.uploaded_by_id === user.id);
+  const canDelete = () => user?.role === "admin";
+  const replaceFile = async file => {
+    if(!file||!replacementId.current)return;
+    if(fileProblem(file)){setError(fileProblem(file));return}
+    setBusy(true);setError('');
+    try {
+      await request(`/api/me/attachments/${replacementId.current}`,{method:'PUT',headers:{'Content-Type':'application/octet-stream','X-File-Name':encodeURIComponent(file.name)},body:file});
+      await onChanged?.();
+    }catch(error){setError(error.message)}
+    finally{setBusy(false)}
+  };
   return (
     <section className={`attachment-box ${compact ? "compact" : ""}`}>
       <h4>
@@ -157,10 +205,10 @@ export function AttachmentList({ items = [], request, user, uploadTarget, onChan
         {items.length > 0 && <b>{items.length}</b>}
       </h4>
       {items.length > 0 ? (
-        <ul className="attachment-list">
+        <ul className="attachment-list attachment-gallery">
           {items.map((item) => (
             <li key={item.id}>
-              <FileIcon name={item.name} />
+              <StoredPreview item={item}/>
               <span>
                 <a href={item.url} target="_blank" rel="noopener" title={item.viewable ? "Открыть" : "Скачать"}>
                   {item.name}
@@ -184,6 +232,7 @@ export function AttachmentList({ items = [], request, user, uploadTarget, onChan
                   <Trash2 />
                 </button>
               )}
+              {replace&&<button type="button" className="secondary" disabled={busy} onClick={()=>{replacementId.current=item.id;replacementRef.current?.click()}}>{busy?'Сохраняем…':'Заменить файл'}</button>}
             </li>
           ))}
         </ul>
@@ -209,6 +258,7 @@ export function AttachmentList({ items = [], request, user, uploadTarget, onChan
           />
         </>
       )}
+      {replace&&<input ref={replacementRef} type="file" accept={ACCEPT} hidden onChange={e=>{const file=e.target.files?.[0];e.target.value='';replaceFile(file)}}/>}
       {error && <p className="attachment-error">{error}</p>}
     </section>
   );

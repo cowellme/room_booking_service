@@ -11,7 +11,7 @@ import logging
 from sqlalchemy import text
 
 from ..database import SessionLocal
-from .booking_lifecycle import expire_pending_requests
+from .booking_lifecycle import complete_finished_bookings
 
 logger = logging.getLogger("room_booking.lifecycle")
 # Two-key lock namespace is separate from one-key room/day advisory locks.
@@ -29,9 +29,9 @@ def run_lifecycle_once(session_factory=None) -> dict:
                 acquired = db.execute(text("SELECT pg_try_advisory_xact_lock(:namespace, :key)"),
                                       {"namespace": LIFECYCLE_LOCK_NAMESPACE, "key": LIFECYCLE_LOCK_KEY}).scalar_one()
                 if not acquired:
-                    return {"ran": False, "expired": 0}
-            expired = expire_pending_requests(db)
-            return {"ran": True, "expired": expired}
+                    return {"ran": False, "completed": 0}
+            completed = complete_finished_bookings(db)
+            return {"ran": True, "completed": completed}
         except Exception:
             db.rollback()
             raise

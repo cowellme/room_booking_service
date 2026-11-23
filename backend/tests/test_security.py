@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from app.main import app
 from app.security import admin_read_user, create_session, decode_session, hash_password, verify_password
 from app.models import User
 from fastapi import HTTPException
@@ -27,3 +28,34 @@ def test_session_contains_identity_and_csrf():
     assert payload["sub"] == "42"
     assert payload["role"] == "admin"
     assert payload["csrf"] == csrf
+
+
+def test_extracted_routes_are_registered():
+    paths = app.openapi()["paths"]
+    expected = {
+        "/api/auth/register/request-code", "/api/auth/register", "/api/auth/login",
+        "/api/auth/password/forgot", "/api/auth/password/reset", "/api/auth/password/change",
+        "/api/auth/logout", "/api/auth/me", "/api/profile", "/api/profile/avatar",
+        "/api/profile/extra-rooms-guide", "/api/profile/extra-rooms-guide/seen",
+        "/api/bookings", "/api/me/bookings", "/api/me/bookings/{booking_id}/cancel",
+        "/api/me/booking-series/{series_id}/cancel", "/api/me/bookings/{booking_id}/extra-rooms",
+        "/api/me/request-with-file", "/api/me/attachments/{attachment_id}",
+        "/api/bookings/{booking_id}/attachments", "/api/booking-series/{series_id}/attachments",
+        "/api/attachments/{attachment_id}", "/api/me/notifications",
+        "/api/admin/bookings", "/api/admin/bookings/{booking_id}/approve",
+        "/api/admin/bookings/{booking_id}/reject",
+        "/api/admin/booking-center", "/api/admin/booking-center/{booking_id}",
+        "/api/admin/booking-center/{booking_id}/extra-rooms",
+        "/api/admin/booking-center/{booking_id}/observers",
+        "/api/admin/booking-center/{booking_id}/transfer",
+        "/api/admin/booking-center/{booking_id}/comments",
+        "/api/admin/booking-center/{booking_id}/comments/{comment_id}/resolve",
+        "/api/admin/booking-center/{booking_id}/archive",
+        "/api/admin/booking-center/{booking_id}/cancel",
+        "/api/admin/booking-center/{booking_id}/status",
+        "/api/admin/booking-bulk/archive", "/api/admin/booking-bulk/delete",
+        "/api/admin/users/search", "/api/me/observed-bookings",
+        "/api/me/observed-bookings/{booking_id}",
+        "/api/me/observed-bookings/{booking_id}/comments",
+    }
+    assert expected <= paths.keys()

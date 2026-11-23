@@ -113,7 +113,7 @@ def test_transfer_keeps_files(env, monkeypatch):
 
 def test_endpoints_upload_open_and_download(env):
     item = env.booking(env.anna)
-    who = {"user": env.anna}
+    who = {"user": env.admin}
     main.app.dependency_overrides[get_db] = lambda: env.db
     main.app.dependency_overrides[current_user] = lambda: who["user"]
     main.app.dependency_overrides[csrf_protected] = lambda: who["user"]
@@ -123,6 +123,7 @@ def test_endpoints_upload_open_and_download(env):
                                headers={"X-File-Name": "%D1%81%D1%85%D0%B5%D0%BC%D0%B0.png"})
         assert response.status_code == 201, response.text
         file_id = response.json()["id"]
+        who["user"] = env.anna
         opened = client.get(f"/api/attachments/{file_id}")
         assert opened.status_code == 200 and opened.content == PNG
         assert opened.headers["content-type"] == "image/png"

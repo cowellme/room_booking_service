@@ -1,0 +1,12 @@
+import {useEffect,useState} from 'react';
+import {Search,UserPlus,X} from 'lucide-react';
+import './bookingObservers.css';
+
+export default function BookingObservers({bookingId,initial,request,onChanged}){
+  const [selected,setSelected]=useState(initial),[query,setQuery]=useState(''),[results,setResults]=useState([]);
+  const [busy,setBusy]=useState(false),[error,setError]=useState('');
+  useEffect(()=>setSelected(initial),[bookingId,initial]);
+  useEffect(()=>{if(!query.trim()){setResults([]);return}let active=true;const timer=setTimeout(()=>request(`/api/admin/users/search?q=${encodeURIComponent(query.trim())}`).then(items=>active&&setResults(items.filter(item=>!selected.some(value=>value.id===item.id)))).catch(failure=>active&&setError(failure.message)),250);return()=>{active=false;clearTimeout(timer)}},[query,selected,request]);
+  const save=async next=>{setBusy(true);setError('');try{const data=await request(`/api/admin/booking-center/${bookingId}/observers`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_ids:next.map(item=>item.id)})});setSelected(data.observers);setQuery('');setResults([]);await onChanged?.()}catch(failure){setError(failure.message)}finally{setBusy(false)}};
+  return <section className="booking-observers"><header><div><h3><UserPlus/>Наблюдатели</h3><p>До пяти пользователей. Они видят подробности и историю, могут писать комментарии, но не изменять заявку.</p></div><b>{selected.length}/5</b></header><div className="observer-chips">{selected.map(item=><span key={item.id}>{item.avatar_url?<img src={item.avatar_url} alt=""/>:<i>{item.full_name?.[0]}</i>}<span><b>{item.full_name}</b><small>#{item.id} · {item.email}</small></span><button type="button" disabled={busy} onClick={()=>save(selected.filter(value=>value.id!==item.id))} aria-label={`Удалить ${item.full_name}`}><X/></button></span>)}{!selected.length&&<em>Наблюдатели не назначены</em>}</div>{selected.length<5&&<label><Search/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Поиск по ФИО, идентификатору или почте"/></label>}{results.length>0&&<div className="observer-results">{results.map(item=><button type="button" key={item.id} disabled={busy} onClick={()=>save([...selected,item])}><b>{item.full_name}</b><span>#{item.id} · {item.email}</span>{item.department&&<small>{item.department}</small>}</button>)}</div>}{error&&<p className="error">{error}</p>}</section>;
+}

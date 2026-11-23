@@ -19,7 +19,9 @@ from tests.test_audit_fixes import DAY, _workbook, book, env, expect  # noqa: F4
 
 
 def user_payload(env, **overrides):
-    data = dict(catering_required=False, technical_support_required=False, room_id=env.rooms[0].id, date=DAY, time_start="10:00", time_end="12:00", title="Семинар",
+    data = dict(catering_required=False, event_location="moscow_campus", catering_storage_required=False,
+                operations_hq_required=False, vip_room_required=False, room_id=env.rooms[0].id,
+                date=DAY, time_start="10:00", time_end="12:00", title="Семинар",
                 participants=10, customer_name="Анна Иванова", customer_contact="+7 900 000-00-00",
                 department_name="Кафедра истории", external_reference="ЗАЯВКА-42")
     data.update(overrides)
@@ -50,7 +52,9 @@ def test_request_number_required_for_both_roles_and_phone_optional(env, role):
 @pytest.mark.parametrize("role", ["admin", "anna"])
 def test_series_requires_number_and_saves_it_for_every_booking(env, role):
     actor = getattr(env, role)
-    payload = BatchBookingCreate(catering_required=False, technical_support_required=False, room_ids=[env.rooms[0].id], date=DAY, date_end=DAY + timedelta(days=1),
+    payload = BatchBookingCreate(catering_required=False, event_location="moscow_campus", catering_storage_required=False,
+                                 operations_hq_required=False, vip_room_required=False, room_ids=[env.rooms[0].id],
+                                 date=DAY, date_end=DAY + timedelta(days=1),
                                  time_start="10:00", time_end="12:00", title="Курс", participants=10,
                                  customer_name="Анна Иванова", department_name="Кафедра истории")
     endpoint = main.create_booking_series if role == "admin" else main.create_user_booking_series

@@ -37,7 +37,6 @@ class Settings:
     min_booking_minutes: int = 30
     max_booking_minutes: int = 840
     # How far ahead a booking may be made; protects against typos such as 2062 instead of 2026.
-    max_days_ahead: int = 730
     timezone: str = "Europe/Moscow"
     allowed_email_domains: tuple[str, ...] = ()
     lifecycle_worker_enabled: bool = True
@@ -106,7 +105,6 @@ def get_settings() -> Settings:
         slot_minutes=int(os.getenv("TIME_SLOT_MINUTES", "30")),
         min_booking_minutes=int(os.getenv("MIN_BOOKING_MINUTES", "30")),
         max_booking_minutes=int(os.getenv("MAX_BOOKING_MINUTES", "840")),
-        max_days_ahead=_int("MAX_BOOKING_DAYS_AHEAD", 730, 1, 3650),
         timezone=os.getenv("APP_TIMEZONE", "Europe/Moscow"),
         allowed_email_domains=tuple(x.strip().lower().lstrip("@") for x in os.getenv("ALLOWED_EMAIL_DOMAINS", "").split(",") if x.strip()),
         email_mode=email_mode,

@@ -19,12 +19,19 @@ def test_phone_booking_accepts_catalog_equipment():
     assert payload.requested_equipment == ["Проектор", "Видеостена"]
 
 
-def test_phone_booking_requires_contact_and_department():
-    with pytest.raises(ValidationError):
-        PhoneBookingCreate(catering_required=False, technical_support_required=False, 
-            room_id=1, date=date.today() + timedelta(days=1), time_start=time(10), time_end=time(11),
-            title="Встреча", customer_name="Учебное управление", participants=8,
-        )
+def test_phone_booking_requires_department_at_submission():
+    from fastapi import HTTPException
+    from app.main import require_request_details
+
+    payload = PhoneBookingCreate(catering_required=False, event_location="moscow_campus",
+        catering_storage_required=False, operations_hq_required=False, vip_room_required=False,
+        room_id=1, date=date(2020, 1, 1), time_start=time(10), time_end=time(11),
+        title="Встреча", customer_name="Учебное управление", participants=8, external_reference="42")
+    with pytest.raises(HTTPException) as error:
+        require_request_details(payload, None)
+    assert "подразделение" in error.value.detail
+    payload.department_name = "ИГСУ"
+    require_request_details(payload, None)
 
 
 def test_cancellation_requires_a_reason():

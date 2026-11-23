@@ -15,11 +15,12 @@ from ..config import settings
 from ..models import Booking, Room
 from ..timeutils import _ZONE, local_now
 
-OPEN_STATUSES = ("pending", "approved")
+OPEN_STATUSES = ("pending", "in_progress", "approved")
 # The state a whole series is shown with: the dates that still matter win over closed ones.
 STATUS_PRIORITY = ("pending", "approved", "completed", "no_show", "transferred", "rejected",
                    "cancelled_by_user", "cancelled_by_admin", "cancelled")
 STATUS_LABELS = {
+    "in_progress": "Принята в работу",
     "pending": "На согласовании", "approved": "Подтверждено", "completed": "Состоялось",
     "no_show": "Неявка", "rejected": "Отклонено", "cancelled": "Отменено",
     "cancelled_by_user": "Отменено пользователем", "cancelled_by_admin": "Отменено администратором",
@@ -288,7 +289,7 @@ def build_analytics(db: Session, date_from: date, date_to: date) -> dict:
     responsible = sorted(({"label": name, **row} for name, row in people.items() if any(row.values())),
                          key=lambda row: (-row["current"], -row["new"], -row["completed"], row["label"]))
 
-    stages_now = Counter("Согласование заявки" if item.status == "pending" else "Подготовка и проведение"
+    stages_now = Counter("Согласование заявки" if item.status in {"pending", "in_progress"} else "Подготовка и проведение"
                          for item in current)
     moderation, preparation, total = [], [], []
     for item in new:

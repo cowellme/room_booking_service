@@ -9,7 +9,7 @@ from ..models import Booking, Room
 from ..equipment import equipment_items
 from ..schemas import AvailabilityRequest
 from ..serializers import room_to_dict
-from .bookings import BLOCKING_STATUSES, capacity_limit
+from .bookings import BLOCKING_STATUSES, capacity_limit, overlap_filters
 
 
 EQUIPMENT_PATTERNS = (
@@ -48,6 +48,7 @@ def availability_room(room: Room, conflict: Booking | None, nearest: Booking | N
     data["conflict"] = None if conflict is None else {
         "booking_id": conflict.id,
         "title": conflict.title,
+        "date": conflict.date.isoformat(),
         "time_start": conflict.time_start.strftime("%H:%M"),
         "time_end": conflict.time_end.strftime("%H:%M"),
         "customer": conflict.customer_name or conflict.booked_by,
@@ -74,16 +75,16 @@ def build_availability(db: Session, payload: AvailabilityRequest) -> dict:
         return {"free": [], "occupied": [], "alternatives": [],
                 "summary": {"free": 0, "occupied": 0, "alternatives": 0}}
 
-    overlap = and_(Booking.time_start < payload.time_end, Booking.time_end > payload.time_start)
     visibility = or_(
         Booking.status.in_(BLOCKING_STATUSES),
-        and_(Booking.status == "pending", overlap),
+        Booking.status.in_(("pending", "in_progress")),
     )
     stmt = select(Booking).where(
         Booking.room_id.in_([room.id for room in rooms]),
-        Booking.date == payload.date,
+        Booking.date.between(payload.date, payload.date_end or payload.date),
         visibility,
-    ).order_by(Booking.room_id, Booking.time_start, Booking.created_at)
+        *overlap_filters(payload.time_start, payload.time_end),
+    ).order_by(Booking.room_id, Booking.date, Booking.time_start, Booking.created_at)
     if payload.exclude_booking_id:
         stmt = stmt.where(Booking.id != payload.exclude_booking_id)
     records_by_room: dict[int, list[Booking]] = defaultdict(list)
@@ -95,11 +96,12 @@ def build_availability(db: Session, payload: AvailabilityRequest) -> dict:
     for room in rooms:
         records = records_by_room[room.id]
         approved = [item for item in records if item.status in BLOCKING_STATUSES]
-        conflict = next((item for item in approved if item.time_start < payload.time_end and item.time_end > payload.time_start), None)
+        conflict = approved[0] if approved else None
         # The booking closest to the requested window: the next one after it, otherwise the last one before it.
-        nearest = next((item for item in approved if item.time_start >= payload.time_end), None) or next(
-            (item for item in reversed(approved) if item.time_end <= payload.time_start), None)
-        pending = [item for item in records if item.status == "pending"]
+        nearest = None
+        if payload.date_end and payload.date_end != payload.date:
+            nearest = None
+        pending = [item for item in records if item.status in {"pending", "in_progress"}]
         room_equipment = {category.casefold() for category in equipment_categories(room.equipment)}
         fits_capacity = capacity_limit(room) >= payload.participants
         fits_building = not payload.building_id or room.building_id == payload.building_id
@@ -121,7 +123,7 @@ def build_availability(db: Session, payload: AvailabilityRequest) -> dict:
             item["match_score"] = int(fits_building) * 3 + int(fits_equipment)
             differences = [text for fits, text in ((fits_building, "другой корпус"),
                                                    (fits_equipment, "нет части оснащения")) if not fits]
-            item["alternative_reason"] = "Свободна в нужное время; " + ", ".join(differences)
+            item["alternative_reason"] = "Свободна на выбранные даты; " + ", ".join(differences)
             alternatives.append(item)
     alternatives.sort(key=lambda item: (-item["match_score"], item["capacity"], item["building_id"], item["number"]))
     return {

@@ -29,7 +29,7 @@ def test_availability_uses_two_batched_queries_and_groups_results():
     building = SimpleNamespace(id=1, name="Первый корпус", image=None, color="#C81340")
     free_room, occupied_room = room(1, "101", building), room(2, "102", building)
     conflict = SimpleNamespace(
-        id=5, room_id=2, status="approved", time_start=time(10), time_end=time(11),
+        id=5, room_id=2, date=date.today(), status="approved", time_start=time(10), time_end=time(11),
         created_at=None, title="Занятие", customer_name="Заказчик", booked_by="Менеджер",
     )
     db = FakeSession([free_room, occupied_room], [conflict])

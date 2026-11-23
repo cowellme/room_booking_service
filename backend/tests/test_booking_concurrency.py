@@ -175,15 +175,16 @@ def test_postgres_competing_rejection_does_not_deadlock_or_leave_partial_booking
         assert check.scalar(select(func.count()).select_from(Booking)) == 2
 
 
-def test_postgres_expiry_skips_in_progress_decision(race):
+def test_postgres_worker_does_not_expire_pending_decisions(race):
     if not race.postgres:
         pytest.skip('Requires isolated PostgreSQL schema')
     with race.factory() as holder, race.factory() as reader:
         booking_locks.lock_booking_record(holder, holder.get(Booking, race.booking_id))
         race.clock.now = datetime(2030, 1, 14, 10, 30)
-        assert lifecycle.expire_pending_requests(reader) == 0
+        assert lifecycle.complete_finished_bookings(reader) == 0
         holder.rollback()
-        assert lifecycle.expire_pending_requests(reader) == 1
+        assert lifecycle.complete_finished_bookings(reader) == 0
+        assert reader.get(Booking, race.booking_id).status == "pending"
 
 
 def test_postgres_approval_holds_request_while_waiting_for_room(race):

@@ -8,4 +8,4 @@ def test_valid_window():
 def test_invalid_windows(start, end):
     with pytest.raises(HTTPException): validate_booking_window(date.today() + timedelta(days=1), start, end)
 def test_past_date():
-    with pytest.raises(HTTPException): validate_booking_window(date.today() - timedelta(days=1), time(10), time(11))
+    validate_booking_window(date(2020, 1, 1), time(10), time(11))

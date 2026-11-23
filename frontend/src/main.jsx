@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import './styles.css';
+import './vshgu.css';
 
 // An error while rendering one screen used to leave a blank white page.
 // Show a way back instead and keep the details in the browser console.

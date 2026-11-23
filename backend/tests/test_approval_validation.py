@@ -94,17 +94,17 @@ def test_approval_rechecks_current_hours_duration_and_slot(race, monkeypatch, se
 
 
 @pytest.mark.parametrize('advance', [datetime(2030, 1, 14, 10, 30), datetime(2030, 1, 15, 9)])
-def test_clock_is_rechecked_after_waiting_for_room_lock(race, advance):
+def test_approval_can_proceed_after_the_booked_time_starts(race, advance):
     def advance_clock(conn, cursor, statement, parameters, context, executemany):
         if 'pg_advisory_xact_lock' in statement:
             race.clock.now = advance
     event.listen(race.engine, 'before_cursor_execute', advance_clock)
     try:
         with race.factory() as db:
-            assert_denied(lambda: approve(race, db), 'прошедш')
+            approve(race, db)
+            assert db.get(Booking, race.booking_id).status == 'approved'
     finally:
         event.remove(race.engine, 'before_cursor_execute', advance_clock)
-    assert_pending_without_decision(race, [race.booking_id])
 
 
 def test_rejection_does_not_require_room_to_still_be_bookable(race):

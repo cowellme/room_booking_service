@@ -20,13 +20,13 @@ def test_closed_booking_cannot_be_changed(status):
     assert exc.value.status_code == 409
 
 
-@pytest.mark.parametrize("status", ["pending", "approved"])
+@pytest.mark.parametrize("status", ["pending", "in_progress", "approved"])
 def test_active_booking_can_be_changed(status):
     ensure_booking_open(SimpleNamespace(status=status))
 
 
 def test_every_allowed_admin_transition_has_audit_summary():
-    assert set(STATUS_SUMMARIES) == {"approved", "rejected", "completed", "no_show"}
+    assert set(STATUS_SUMMARIES) == {"in_progress", "approved", "rejected", "completed", "no_show"}
 
 
 def test_future_active_booking_cannot_be_archived():

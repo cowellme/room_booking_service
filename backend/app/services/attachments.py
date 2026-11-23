@@ -14,9 +14,10 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from ..models import Booking, BookingAttachment, User
+from ..models import Booking, BookingAttachment, BookingObserver, User
 from .booking_lifecycle import CLOSED_BOOKING_STATUSES
 from .bookings import record_event
+from ..timeutils import utc_now
 
 ATTACHMENTS_DIR = Path(os.getenv("ATTACHMENTS_DIR") or Path(__file__).resolve().parents[2] / "storage" / "attachments")
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -125,6 +126,15 @@ def _can_access(user: User, bookings: list[Booking]) -> bool:
     return user.role == "admin" or any(item.owner_id == user.id for item in bookings)
 
 
+def _can_read(db: Session, user: User, bookings: list[Booking]) -> bool:
+    """Observers may open files, but never gain upload, replace or delete rights."""
+    if _can_access(user, bookings):
+        return True
+    booking_ids = [item.id for item in bookings]
+    return bool(booking_ids and db.scalar(select(BookingObserver.id).where(
+        BookingObserver.user_id == user.id, BookingObserver.booking_id.in_(booking_ids))))
+
+
 def _target_bookings(db: Session, *, booking_id: int | None = None, series_id: str | None = None) -> list[Booking]:
     if booking_id is not None:
         item = db.get(Booking, booking_id)
@@ -132,13 +142,7 @@ def _target_bookings(db: Session, *, booking_id: int | None = None, series_id: s
     return list(db.scalars(select(Booking).where(Booking.series_id == series_id)))
 
 
-def save_attachment(db: Session, user: User, content: bytes, raw_name: str | None, *,
-                    booking_id: int | None = None, series_id: str | None = None) -> dict:
-    bookings = _target_bookings(db, booking_id=booking_id, series_id=series_id)
-    if not bookings or not _can_access(user, bookings):
-        raise HTTPException(404, "Бронирование не найдено")
-    if user.role != "admin" and all(item.status in CLOSED_BOOKING_STATUSES for item in bookings):
-        raise HTTPException(409, "К закрытой заявке нельзя добавить файлы")
+def validate_attachment(content: bytes, raw_name: str | None) -> tuple[str, str]:
     name = clean_file_name(raw_name)
     extension = _extension(name)
     if extension not in ALLOWED_TYPES:
@@ -149,6 +153,17 @@ def save_attachment(db: Session, user: User, content: bytes, raw_name: str | Non
         raise HTTPException(413, "Размер файла должен быть не более 20 МБ")
     if not _content_matches(extension, content):
         raise HTTPException(415, f"Содержимое файла не похоже на .{extension}. Проверьте файл или сохраните его заново")
+    return name, extension
+
+
+def save_attachment(db: Session, user: User, content: bytes, raw_name: str | None, *,
+                    booking_id: int | None = None, series_id: str | None = None, commit: bool = True) -> dict:
+    bookings = _target_bookings(db, booking_id=booking_id, series_id=series_id)
+    if not bookings or not _can_access(user, bookings):
+        raise HTTPException(404, "Бронирование не найдено")
+    if user.role != "admin" and all(item.status in CLOSED_BOOKING_STATUSES for item in bookings):
+        raise HTTPException(409, "К закрытой заявке нельзя добавить файлы")
+    name, extension = validate_attachment(content, raw_name)
     # Parallel uploads to one booking or series wait for each other here, so the
     # file limit below cannot be passed by sending several files at once.
     lock_rows = select(Booking.id).where(Booking.id.in_([item.id for item in bookings])).order_by(Booking.id)
@@ -168,12 +183,46 @@ def save_attachment(db: Session, user: User, content: bytes, raw_name: str | Non
         db.add(item); db.flush()
         for booking in bookings:
             record_event(db, booking, user, "attachment_added", f"Прикреплён файл «{name}»", {"attachment_id": item.id})
-        db.commit()
+        if commit:
+            db.commit()
     except Exception:
         db.rollback()
         (ATTACHMENTS_DIR / stored_name).unlink(missing_ok=True)
         raise
-    db.refresh(item)
+    if commit:
+        db.refresh(item)
+    return attachment_to_dict(item)
+
+
+def replace_attachment(db: Session, user: User, attachment_id: int, content: bytes, raw_name: str | None) -> dict:
+    name, extension = validate_attachment(content, raw_name)
+    item = db.scalar(select(BookingAttachment).where(BookingAttachment.id == attachment_id).with_for_update())
+    if not item:
+        raise HTTPException(404, "Файл не найден")
+    bookings = _target_bookings(db, booking_id=item.booking_id, series_id=item.series_id)
+    if not bookings or not all(booking.owner_id == user.id and booking.record_kind == "booking" for booking in bookings):
+        raise HTTPException(404, "Файл не найден")
+    old_path, old_name = item.stored_name, item.original_name
+    ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}.{extension}"
+    path = ATTACHMENTS_DIR / stored_name
+    try:
+        path.write_bytes(content)
+        item.stored_name = stored_name
+        item.original_name = name
+        item.content_type = ALLOWED_TYPES[extension]
+        item.size = len(content)
+        item.uploaded_by_id = user.id
+        item.created_at = utc_now()
+        for booking in bookings:
+            record_event(db, booking, user, "attachment_replaced", "Файл заменён",
+                         {"attachment_id": item.id, "before": old_name, "after": name, "replacement_id": stored_name.split(".")[0]})
+        db.commit()
+    except Exception:
+        db.rollback()
+        path.unlink(missing_ok=True)
+        raise
+    remove_unused_files(db, [old_path])
     return attachment_to_dict(item)
 
 
@@ -182,7 +231,7 @@ def get_attachment_for(db: Session, user: User, attachment_id: int) -> tuple[Boo
     if not item:
         raise HTTPException(404, "Файл не найден")
     bookings = _target_bookings(db, booking_id=item.booking_id, series_id=item.series_id)
-    if not (_can_access(user, bookings) or item.uploaded_by_id == user.id):
+    if not (_can_read(db, user, bookings) or item.uploaded_by_id == user.id):
         raise HTTPException(404, "Файл не найден")
     path = ATTACHMENTS_DIR / item.stored_name
     if not path.is_file():

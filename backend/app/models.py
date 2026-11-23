@@ -64,7 +64,7 @@ class Booking(Base):
         Index("ix_booking_room_window", "room_id", "date", "time_start", "time_end"),
         booking_overlap_constraint(),
         CheckConstraint("time_end > time_start", name="ck_booking_time_order"),
-        CheckConstraint("status IN ('pending','approved','rejected','cancelled','cancelled_by_user','cancelled_by_admin','completed','no_show','transferred')", name="ck_booking_status"),
+        CheckConstraint("status IN ('pending','in_progress','approved','rejected','cancelled','cancelled_by_user','cancelled_by_admin','completed','no_show','transferred')", name="ck_booking_status"),
         CheckConstraint("record_kind IN ('booking','maintenance','setup','teardown','unavailable')", name="ck_booking_record_kind"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -74,6 +74,7 @@ class Booking(Base):
     time_start: Mapped[time] = mapped_column(Time)
     time_end: Mapped[time] = mapped_column(Time)
     title: Mapped[str] = mapped_column(String(200))
+    event_format: Mapped[str] = mapped_column(String(120), default="Другое")
     booking_type: Mapped[str] = mapped_column(String(50), default="other")
     group_name: Mapped[str | None] = mapped_column(String(100))
     teacher: Mapped[str | None] = mapped_column(String(200))
@@ -84,6 +85,10 @@ class Booking(Base):
     # None means the requester did not answer (records created before the question existed).
     catering_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     technical_support_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    event_location: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    catering_storage_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    operations_hq_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    vip_room_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     source: Mapped[str] = mapped_column(String(30), default="self_service", index=True)
     customer_name: Mapped[str | None] = mapped_column(String(200))
     customer_contact: Mapped[str | None] = mapped_column(String(200))
@@ -123,6 +128,7 @@ class Booking(Base):
     previous_booking: Mapped["Booking | None"] = relationship(remote_side="Booking.id", foreign_keys=[previous_booking_id])
     events: Mapped[list["BookingEvent"]] = relationship(back_populates="booking", cascade="all, delete-orphan", order_by="BookingEvent.created_at")
     comments: Mapped[list["BookingComment"]] = relationship(back_populates="booking", cascade="all, delete-orphan", order_by="BookingComment.created_at")
+    observers: Mapped[list["BookingObserver"]] = relationship(back_populates="booking", cascade="all, delete-orphan")
 
 
 class User(Base):
@@ -150,6 +156,19 @@ class User(Base):
     last_failed_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bookings: Mapped[list[Booking]] = relationship(back_populates="owner", foreign_keys=[Booking.owner_id])
+
+
+class BookingObserver(Base):
+    __tablename__ = "booking_observers"
+    __table_args__ = (UniqueConstraint("booking_id", "user_id", name="uq_booking_observer"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey("bookings.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    assigned_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    booking: Mapped[Booking] = relationship(back_populates="observers")
+    user: Mapped[User] = relationship(foreign_keys=[user_id])
+    assigned_by: Mapped[User] = relationship(foreign_keys=[assigned_by_id])
 
 
 class BookingHistory(Base):

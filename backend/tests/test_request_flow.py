@@ -131,15 +131,23 @@ def test_admin_booking_and_service_block_reject_competing_requests(env):
         room_ids=[env.rooms[1].id], date=DAY, date_end=DAY, time_start="08:00", time_end="22:00",
         record_kind="maintenance", title="Ремонт", reason="Ремонт"), env.admin)
     assert (first.status, second.status) == ("rejected", "rejected")
+    blocks = main.list_blocks(env.admin, env.db)
+    assert len(blocks) == 1
+    assert blocks[0]["record_kind"] == "maintenance"
+    assert blocks[0]["date"] == DAY.isoformat()
+    assert blocks[0]["room_number"] == env.rooms[1].number
+    assert any(item["record_kind"] == "maintenance"
+               for item in main.bookings(DAY, DAY, env.rooms[1].id, env.admin, env.db))
 
 
-def test_request_cannot_be_approved_after_its_start(env):
+def test_create_and_approve_request_for_a_past_date(env):
+    env.clock.now = datetime.combine(DAY + timedelta(days=1), time(10))
     item = request(env, env.anna)
-    env.clock.now = datetime.combine(DAY, time(10, 30))
-    expect(409, lifecycle.transition_booking_status, env.db, item, env.admin, "approved")
-    assert item.status == "pending"  # a failed command does not perform automatic expiry
-    lifecycle.expire_pending_requests(env.db)
-    assert item.status == "rejected"
+    assert lifecycle.complete_finished_bookings(env.db) == 0
+    assert item.status == "pending"
+    lifecycle.transition_booking_status(env.db, item, env.admin, "approved")
+    assert lifecycle.complete_finished_bookings(env.db) == 1
+    assert item.status == "completed"
 
 
 def test_rejection_needs_a_real_reason(env):
@@ -164,13 +172,11 @@ def test_series_with_a_busy_date_can_approve_only_free_dates(env):
     assert statuses(items) == ["approved", "rejected", "approved"]
 
 
-def test_expired_series_cannot_be_approved(env):
+def test_past_series_can_be_approved(env):
+    env.clock.now = datetime.combine(DAY + timedelta(days=4), time(10))
     items = series(env, env.anna)
-    env.clock.now = datetime.combine(DAY, time(10, 30))
-    expect(409, lifecycle.transition_series_status, env.db, items[0].series_id, env.admin, "approved")
-    assert statuses(items) == ["pending", "pending", "pending"]
-    lifecycle.expire_pending_requests(env.db)
-    assert statuses(items) == ["rejected", "rejected", "rejected"]
+    assert lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "approved") == 3
+    assert statuses(items) == ["approved"] * 3
 
 
 def test_moderation_list_flags_competition_and_conflicts(env):
@@ -180,20 +186,40 @@ def test_moderation_list_flags_competition_and_conflicts(env):
     expect(403, main.moderation, env.anna, env.db)
 
 
+def test_transfer_without_times_preserves_the_original_window(env):
+    original = request(env, env.admin, start="10:00", end="12:00")
+    payload = BookingTransferRequest(
+        catering_required=False, technical_support_required=False,
+        room_id=env.rooms[1].id, date=DAY + timedelta(days=1),
+        title=original.title, reason="Замена аудитории",
+    )
+
+    moved = operations.transfer_booking(env.db, original, payload, env.admin)
+
+    assert (moved.time_start, moved.time_end) == (time(10), time(12))
+
+
 # --- Expiry and completion -----------------------------------------------------
 
-def test_clock_closes_unreviewed_requests_and_completes_past_bookings(env):
+def test_clock_keeps_unreviewed_requests_and_completes_past_bookings(env):
     pending, confirmed = request(env, env.anna), request(env, env.admin, room=1)
-    env.clock.now = datetime.combine(DAY, time(12, 30))
-    lifecycle.expire_pending_requests(env.db)
-    assert (pending.status, confirmed.status) == ("rejected", "completed")
+    env.clock.now = datetime.combine(DAY + timedelta(days=1), time(0))
+    lifecycle.complete_finished_bookings(env.db)
+    assert (pending.status, confirmed.status) == ("pending", "completed")
 
 
-def test_series_expires_as_one_submission(env):
-    items = series(env, env.anna)
-    env.clock.now = datetime.combine(DAY, time(10, 0))
-    lifecycle.expire_pending_requests(env.db)
-    assert statuses(items) == ["rejected", "rejected", "rejected"]
+def test_completed_booking_prevents_past_blocking_and_double_booking(env):
+    env.clock.now = datetime.combine(DAY + timedelta(days=1), time(10))
+    booking = request(env, env.admin)
+    lifecycle.complete_finished_bookings(env.db)
+    assert booking.status == "completed"
+    expect(409, request, env, env.anna)
+    payload = ServiceBlockCreate(room_ids=[booking.room_id], date=DAY, date_end=DAY,
+                                 time_start="10:00", time_end="12:00",
+                                 record_kind="maintenance", title="Ремонт", reason="Ремонт")
+    expect(409, operations.create_service_blocks, env.db, payload, env.admin)
+    payload.room_ids = [env.rooms[1].id]
+    assert len(operations.create_service_blocks(env.db, payload, env.admin)) == 1
 
 
 def test_completion_marks_are_only_for_started_events(env):
@@ -257,9 +283,45 @@ def test_calendar_hides_all_pending_requests_for_both_roles(env):
     request(env, env.admin, day=DAY + timedelta(days=1))
     env.clock.now = datetime.combine(DAY, time(9, 0))
     visible = {item["id"] for item in main.bookings(DAY, DAY + timedelta(days=1), None, env.anna, env.db)}
-    assert own.id not in visible and past.id in visible and other.id not in visible
+    assert own.id not in visible and other.id not in visible
+    masked = main.bookings(DAY, DAY, past.room_id, env.anna, env.db)
+    assert masked == [{"id": f"busy-{past.room_id}-{DAY}", "room_id": past.room_id,
+                       "date": DAY.isoformat(), "status": "approved", "restricted": True}]
+    past.room.building.name = main.SECOND_BUILDING_NAME
+    env.db.flush()
+    detailed = main.bookings(DAY, DAY, past.room_id, env.anna, env.db)
+    assert detailed[0]["id"] == past.id and detailed[0]["title"] == past.title
     admin_view = {item["id"] for item in main.bookings(DAY, DAY, None, env.admin, env.db)}
     assert own.id not in admin_view and past.id in admin_view
+
+
+def test_in_progress_is_visible_to_moderation_but_does_not_block_calendar(env):
+    item = request(env, env.anna)
+    cursor = last_event_id(env)
+    lifecycle.transition_booking_status(env.db, item, env.admin, "in_progress")
+    assert item.status == "in_progress"
+    assert item.id in {row["id"] for row in main.moderation(env.admin, env.db)}
+    assert item.id not in {row["id"] for row in main.bookings(DAY, DAY, None, env.admin, env.db)}
+    notes = main.my_notifications(cursor, env.anna, env.db)
+    assert len(notes) == 1 and notes[0]["type"] == "in_progress"
+    competing = request(env, env.boris)
+    assert competing.status == "pending"
+
+
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+def test_in_progress_can_receive_final_decision(env, decision):
+    item = request(env, env.anna)
+    lifecycle.transition_booking_status(env.db, item, env.admin, "in_progress")
+    lifecycle.transition_booking_status(env.db, item, env.admin, decision, "Нет мест" if decision == "rejected" else None)
+    assert item.status == decision
+
+
+def test_series_can_be_taken_in_work_and_confirmed(env):
+    items = series(env, env.anna)
+    lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "in_progress")
+    assert statuses(items) == ["in_progress"] * 3
+    lifecycle.transition_series_status(env.db, items[0].series_id, env.admin, "approved")
+    assert statuses(items) == ["approved"] * 3
 
 
 # --- Notifications -------------------------------------------------------------
@@ -277,8 +339,7 @@ def test_series_decision_is_one_notification(env):
 
 
 def test_notifications_after_cursor_have_no_gaps(env):
-    items = [request(env, env.anna, day=DAY + timedelta(days=i // 6), start=f"{8 + 2 * (i % 6):02d}:00",
-                     end=f"{9 + 2 * (i % 6):02d}:00") for i in range(40)]
+    items = [request(env, env.anna, day=DAY + timedelta(days=i)) for i in range(40)]
     cursor = last_event_id(env)
     for item in items:
         lifecycle.transition_booking_status(env.db, item, env.admin, "rejected", "Нет мест")
@@ -303,8 +364,8 @@ def test_analytics_counts_requests_with_a_series_as_one(env):
     for item in env.db.scalars(select(Booking)):
         item.created_at = datetime(2030, 1, 7, 6, 0)  # stored in UTC, 09:00 local
     env.db.commit()
-    env.clock.now = datetime.combine(DAY + timedelta(days=5), time(13))
-    lifecycle.expire_pending_requests(env.db)
+    env.clock.now = datetime.combine(DAY + timedelta(days=6), time(0))
+    lifecycle.complete_finished_bookings(env.db)
     report = build_analytics(env.db, DAY - timedelta(days=30), DAY + timedelta(days=5))
     assert report["kpi"]["new"] == 3 and report["kpi"]["records_new"] == 5
     assert report["kpi"]["completed"] == 1 and created.status == "completed"

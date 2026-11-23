@@ -2,6 +2,7 @@ import datetime as dt
 from datetime import date, time
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from .config import settings
 
 
 MAX_EXTRA_ROOMS = 10
@@ -31,19 +32,60 @@ class ExtraRoomRequest(CleanText):
         return self
 
 
-class BookingCreate(CleanText):
+BOOKING_LOGISTICS_LABELS = {
+    "event_location": "место проведения мероприятия",
+    "catering_required": "аудитория для организации питания",
+    "catering_storage_required": "аудитория под склад кейтеринга",
+    "operations_hq_required": "аудитория для оперативного штаба",
+    "vip_room_required": "комната для VIP-гостей",
+}
+
+
+class BookingHours(CleanText):
+    time_start: time = Field(default_factory=lambda: time(settings.work_hours_start))
+    time_end: time = Field(default_factory=lambda: time(settings.work_hours_end))
+
+    @model_validator(mode="after")
+    def validate_hours(self):
+        if ("time_start" in self.model_fields_set) != ("time_end" in self.model_fields_set):
+            raise ValueError("Укажите обе границы времени или только даты")
+        if self.time_start >= self.time_end:
+            raise ValueError("Время окончания должно быть позже времени начала")
+        return self
+
+
+def validate_date_range(start: date, end: date | None) -> None:
+    if end is None:
+        return
+    days = (end - start).days
+    if days < 0:
+        raise ValueError("Дата окончания должна быть не раньше даты начала")
+    if days >= 366:
+        raise ValueError("Период бронирования не может быть длиннее 366 дней")
+
+
+class BookingLogistics(CleanText):
+    # Historical records and partial updates can be unanswered. New requests
+    # must explicitly answer every question at the API boundary.
+    event_location: Literal["moscow_campus", "remote_site"] | None = None
+    catering_storage_required: bool | None = Field(default=None, strict=True)
+    operations_hq_required: bool | None = Field(default=None, strict=True)
+    vip_room_required: bool | None = Field(default=None, strict=True)
+
+
+class BookingCreate(BookingLogistics, BookingHours):
     room_id: int
     date: date
-    time_start: time
-    time_end: time
+    date_end: date | None = None
     title: str = Field(min_length=2, max_length=200)
+    event_format: str = Field(default="Другое", min_length=2, max_length=120)
     booking_type: str = Field(default="other", max_length=50)
     group_name: str | None = Field(default=None, max_length=100)
     teacher: str | None = Field(default=None, max_length=200)
     comment: str | None = Field(default=None, max_length=1000)
     requested_equipment: list[str] = Field(default_factory=list, max_length=20)
     catering_required: bool = Field(strict=True)
-    technical_support_required: bool = Field(strict=True)
+    technical_support_required: bool | None = Field(default=None, strict=True)
     participants: int | None = Field(default=None, ge=1, le=5000)
     department_id: int | None = None
     department_name: str | None = Field(default=None, min_length=2, max_length=250)
@@ -62,9 +104,8 @@ class BookingCreate(CleanText):
         return self
 
     @model_validator(mode="after")
-    def validate_time(self):
-        if self.time_start >= self.time_end:
-            raise ValueError("Время окончания должно быть позже времени начала")
+    def validate_period(self):
+        validate_date_range(self.date, self.date_end)
         return self
 
 
@@ -92,8 +133,10 @@ class RegisterRequest(BaseModel):
     def validate_identity(self):
         import re
         self.full_name = re.sub(r"\s+", " ", self.full_name.strip())
-        if not re.fullmatch(r"[А-ЯЁA-Z][а-яёa-z]+(?:-[А-ЯЁA-Z][а-яёa-z]+)* [А-ЯЁA-Z]\. [А-ЯЁA-Z]\.", self.full_name):
-            raise ValueError("Укажите ФИО в формате Иванов И. П.")
+        parts = self.full_name.split(" ")
+        name_part = r"[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]*(?:\.)?"
+        if not 2 <= len(parts) <= 4 or not all(re.fullmatch(name_part, part) for part in parts):
+            raise ValueError("Укажите фамилию и имя; отчество можно написать полностью или инициалами")
         self.department = self.department.strip().upper()
         if len(self.department) < 2:
             raise ValueError("Укажите название подразделения")
@@ -123,19 +166,17 @@ class RejectRequest(CleanText):
     reason: str = Field(min_length=3, max_length=500)
 
 
-class AvailabilityRequest(BaseModel):
+class AvailabilityRequest(BookingHours):
     date: date
-    time_start: time
-    time_end: time
+    date_end: date | None = None
     participants: int = Field(default=1, ge=1, le=5000)
     building_id: int | None = None
     equipment: list[str] = Field(default_factory=list, max_length=20)
     exclude_booking_id: int | None = None
 
     @model_validator(mode="after")
-    def validate_time(self):
-        if self.time_start >= self.time_end:
-            raise ValueError("Время окончания должно быть позже времени начала")
+    def validate_period(self):
+        validate_date_range(self.date, self.date_end)
         return self
 
 
@@ -147,20 +188,19 @@ class PhoneBookingCreate(BookingCreate):
     participants: int = Field(ge=1, le=5000)
 
 
-class BatchBookingCreate(CleanText):
+class BatchBookingCreate(BookingLogistics, BookingHours):
     room_ids: list[int] = Field(min_length=1, max_length=30)
     date: date
     date_end: date
-    time_start: time
-    time_end: time
     title: str = Field(min_length=2, max_length=200)
+    event_format: str = Field(default="Другое", min_length=2, max_length=120)
     booking_type: str = Field(default="other", max_length=50)
     group_name: str | None = Field(default=None, max_length=100)
     teacher: str | None = Field(default=None, max_length=200)
     comment: str | None = Field(default=None, max_length=1000)
     requested_equipment: list[str] = Field(default_factory=list, max_length=20)
     catering_required: bool = Field(strict=True)
-    technical_support_required: bool = Field(strict=True)
+    technical_support_required: bool | None = Field(default=None, strict=True)
     participants: int | None = Field(default=None, ge=1, le=5000)
     customer_name: str | None = Field(default=None, max_length=200)
     customer_contact: str | None = Field(default=None, max_length=200)
@@ -186,11 +226,9 @@ class BatchBookingCreate(CleanText):
         return self
 
 
-class SeriesAvailabilityRequest(BaseModel):
+class SeriesAvailabilityRequest(BookingHours):
     date: date
     date_end: date
-    time_start: time
-    time_end: time
     weekdays: list[int] = Field(default_factory=lambda: list(range(7)), min_length=1, max_length=7)
     room_ids: list[int] = Field(default_factory=list, max_length=500)
 
@@ -218,13 +256,17 @@ class BookingTransferRequest(BookingCreate):
     reason: str = Field(min_length=3, max_length=500)
     notify_customer: bool = True
 
+    @model_validator(mode="after")
+    def validate_single_occurrence(self):
+        if self.date_end not in (None, self.date):
+            raise ValueError("За один перенос можно изменить только одну запись календаря")
+        return self
 
-class ServiceBlockCreate(CleanText):
+
+class ServiceBlockCreate(BookingHours):
     room_ids: list[int] = Field(min_length=1, max_length=100)
     date: date
     date_end: date
-    time_start: time
-    time_end: time
     record_kind: Literal["maintenance", "setup", "teardown", "unavailable"]
     title: str = Field(min_length=2, max_length=200)
     reason: str = Field(min_length=2, max_length=1000)
@@ -255,12 +297,17 @@ class BookingCommentResolve(BaseModel):
     resolved: bool = True
 
 
-class BookingUpdate(CleanText):
+class BookingObserversUpdate(BaseModel):
+    user_ids: list[int] = Field(default_factory=list, max_length=5)
+
+
+class BookingUpdate(BookingLogistics):
     room_id: int | None = None
     date: dt.date | None = None
     time_start: dt.time | None = None
     time_end: dt.time | None = None
     title: str | None = Field(default=None, min_length=2, max_length=200)
+    event_format: str | None = Field(default=None, min_length=2, max_length=120)
     booking_type: str | None = Field(default=None, max_length=50)
     group_name: str | None = Field(default=None, max_length=100)
     teacher: str | None = Field(default=None, max_length=200)
@@ -269,8 +316,7 @@ class BookingUpdate(CleanText):
     participants: int | None = Field(default=None, ge=1, le=5000)
     comment: str | None = Field(default=None, max_length=1000)
     requested_equipment: list[str] | None = Field(default=None, max_length=20)
-    catering_required: bool | None = None
-    technical_support_required: bool | None = None
+    catering_required: bool | None = Field(default=None, strict=True)
     department_id: int | None = None
     external_channel: str | None = Field(default=None, max_length=40)
     external_reference: str | None = Field(default=None, max_length=120)
@@ -279,7 +325,7 @@ class BookingUpdate(CleanText):
     @model_validator(mode="after")
     def reject_cleared_required(self):
         # Omitting a field keeps it; sending null for a required column used to end in a 500.
-        required = ("room_id", "date", "time_start", "time_end", "title", "booking_type", "catering_required", "technical_support_required")
+        required = ("room_id", "date", "time_start", "time_end", "title", "booking_type", *BOOKING_LOGISTICS_LABELS)
         cleared = [name for name in required if name in self.model_fields_set and getattr(self, name) is None]
         if cleared:
             raise ValueError("Нельзя очистить обязательные поля: " + ", ".join(cleared))
@@ -298,7 +344,7 @@ class BookingCancelRequest(CleanText):
 
 
 class BookingStatusRequest(BaseModel):
-    status: Literal["approved", "rejected", "completed", "no_show"]
+    status: Literal["in_progress", "approved", "rejected", "completed", "no_show"]
     reason: str | None = Field(default=None, max_length=500)
 
 

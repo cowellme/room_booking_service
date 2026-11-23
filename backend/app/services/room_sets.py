@@ -15,11 +15,12 @@ from sqlalchemy.orm import Session, joinedload
 from ..timeutils import utc_now
 from ..models import Booking, Room, User
 from ..schemas import MAX_EXTRA_ROOMS, ExtraRoomRequest
-from .bookings import find_conflict, find_own_duplicate, record_event, reject_competing_requests, validate_booking_window, validate_booking_lead_time
+from .bookings import find_conflict, find_own_duplicate, record_event, reject_competing_requests, validate_booking_window
 
 from .booking_locks import lock_booking_record
 
-OPEN_STATUSES = ("pending", "approved")
+OPEN_STATUSES = ("pending", "in_progress", "approved")
+REVIEW_STATUSES = ("pending", "in_progress")
 
 
 def lock_room_day(db: Session, room_id: int, booking_date: date) -> None:
@@ -46,7 +47,6 @@ def create_extra_rooms(db: Session, main: Booking, extras: list[ExtraRoomRequest
     """
     if not extras:
         return []
-    validate_booking_lead_time(main.date)
     main = lock_booking_record(db, main)
     if main.parent_booking_id:
         raise HTTPException(409, "Дополнительную аудиторию можно добавить только к основной брони")
@@ -72,14 +72,15 @@ def create_extra_rooms(db: Session, main: Booking, extras: list[ExtraRoomRequest
         validate_booking_window(main.date, start, end)
         lock_room_day(db, room.id, main.date)
         if find_conflict(db, room.id, main.date, start, end):
-            raise HTTPException(409, f"Аудитория {room.number} занята {start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
-                                     " — выберите другую или измените время")
+            raise HTTPException(409, f"Аудитория {room.number} занята на эту дату — выберите другую аудиторию или дату")
         if actor.role != "admin" and find_own_duplicate(db, main.owner_id, room.id, main.date, start, end):
-            raise HTTPException(409, f"У вас уже есть заявка на аудиторию {room.number} в это время")
+            raise HTTPException(409, f"У вас уже есть заявка на аудиторию {room.number} на эту дату")
         item = Booking(
             room_id=room.id, owner_id=main.owner_id, date=main.date, time_start=start, time_end=end,
-            title=_title(main, extra.purpose), booking_type=main.booking_type, booked_by=main.booked_by, email=main.email,
+            title=_title(main, extra.purpose), event_format=main.event_format, booking_type=main.booking_type, booked_by=main.booked_by, email=main.email,
             comment=None, requested_equipment=[], catering_required=main.catering_required, technical_support_required=main.technical_support_required, source=main.source,
+            event_location=main.event_location, catering_storage_required=main.catering_storage_required,
+            operations_hq_required=main.operations_hq_required, vip_room_required=main.vip_room_required,
             created_at=main.created_at,
             customer_name=main.customer_name, customer_contact=main.customer_contact, participants=None,
             department_id=main.department_id, external_channel=main.external_channel,
@@ -101,7 +102,7 @@ def create_extra_rooms(db: Session, main: Booking, extras: list[ExtraRoomRequest
 
 def ensure_set_can_be_approved(db: Session, main: Booking) -> list[Booking]:
     """Pending extra rooms that will be approved with `main`; a busy one blocks the whole set."""
-    extras = [item for item in extra_rooms_of(db, main) if item.status == "pending"]
+    extras = [item for item in extra_rooms_of(db, main) if item.status in REVIEW_STATUSES]
     busy = []
     for item in extras:
         lock_room_day(db, item.room_id, item.date)
@@ -117,14 +118,16 @@ def decide_extra_rooms(db: Session, extras: list[Booking], actor: User, status: 
     """Apply the decision on the main booking to its pending extra rooms."""
     now = utc_now()
     for item in extras:
+        previous = item.status
         item.status = status
         item.updated_at = now
-        item.decision_at = now
-        item.decided_by_id = actor.id
-        item.decision_reason = reason.strip() if reason else None
-        item.hold_expires_at = None
-        summary = "Бронирование подтверждено" if status == "approved" else "Заявка отклонена"
-        record_event(db, item, actor, status, summary, {"previous_status": "pending", "reason": reason, "set_id": main.id})
+        if status in {"approved", "rejected"}:
+            item.decision_at = now
+            item.decided_by_id = actor.id
+            item.decision_reason = reason.strip() if reason else None
+            item.hold_expires_at = None
+        summary = {"approved": "Бронирование подтверждено", "rejected": "Заявка отклонена", "in_progress": "Заявка принята в работу"}[status]
+        record_event(db, item, actor, status, summary, {"previous_status": previous, "reason": reason, "set_id": main.id})
     if status == "approved":
         db.flush()
         for item in extras:
@@ -134,7 +137,7 @@ def decide_extra_rooms(db: Session, extras: list[Booking], actor: User, status: 
 def ensure_extra_can_be_approved_alone(db: Session, item: Booking) -> None:
     if item.parent_booking_id:
         main = db.get(Booking, item.parent_booking_id)
-        if main and main.status == "pending":
+        if main and main.status in REVIEW_STATUSES:
             raise HTTPException(409, "Это дополнительная аудитория — подтвердите комплект через основную бронь")
 
 
