@@ -9,9 +9,9 @@
 .calendar-month-panel header strong{font-size:18px}
 .calendar-month-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
 .calendar-month-grid button{padding:11px 3px;border:1px solid #ececf1;border-radius:8px;background:#faf9fb;color:#253048;font-size:13px}
-.calendar-month-grid button:hover{background:#fcebf1;border-color:#c81340}
+.calendar-month-grid button:hover{background:#fcebf1;border-color:#007895}
 .calendar-month-grid button[aria-current="date"]{border-color:#16836b}
-.calendar-month-grid button.active{background:#c81340;border-color:#c81340;color:#fff;font-weight:700}
+.calendar-month-grid button.active{background:#007895;border-color:#007895;color:#fff;font-weight:700}
 .calendar-month-current{width:100%;margin-top:12px;padding:9px;border:0;border-radius:8px;color:#a61036;background:#fff0f4;font-weight:600}
 .calendar-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;grid-column:2;grid-row:1;min-width:0}
 .calendar-toolbar-actions .view-switch,.calendar-toolbar-actions .calendar-nav-v2{flex-shrink:0}

@@ -18,7 +18,7 @@
 .room-set-list{display:grid;gap:8px;margin-top:12px}
 .room-set-list h4{display:flex;align-items:center;gap:6px;margin:0;font-size:13px;font-weight:800}
 .room-set-list h4 svg{width:15px;height:15px}
-.room-set-list h4 b{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--wine,#c81340);color:#fff;font-size:11px}
+.room-set-list h4 b{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--wine,#007895);color:#fff;font-size:11px}
 .room-set-list ul{list-style:none;margin:0;padding:0;display:grid;gap:6px}
 .room-set-list li{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line,#e3e3ea);border-radius:10px;background:var(--surface,#fff)}
 .room-set-list li.closed{opacity:.6}
@@ -33,19 +33,19 @@
 .room-set-list li button{font-size:12px;padding:5px 10px}
 .room-set-add{display:grid;gap:8px;margin-top:8px}
 .room-set-add>button{justify-self:start}
-.room-set-list li{padding:13px;border:1px solid color-mix(in srgb,var(--set-room-color,#c81340) 32%,white);border-left:5px solid var(--set-room-color,#c81340);border-radius:11px;background:color-mix(in srgb,var(--set-room-color,#c81340) 7%,white);box-shadow:0 3px 12px #2721380c}
+.room-set-list li{padding:13px;border:1px solid color-mix(in srgb,var(--set-room-color,#007895) 32%,white);border-left:5px solid var(--set-room-color,#007895);border-radius:11px;background:color-mix(in srgb,var(--set-room-color,#007895) 7%,white);box-shadow:0 3px 12px #2721380c}
 .room-set-list li.closed{opacity:1}
 .room-set-list li>span{gap:6px}
 .room-set-list li>span>b{font-size:16px;line-height:1.25;color:#211d30}
 .room-set-list li>span>small{font-size:13px;line-height:1.35}
-.room-set-list li>span>.room-set-building{font-weight:700;color:var(--set-room-color,#c81340)}
+.room-set-list li>span>.room-set-building{font-weight:700;color:var(--set-room-color,#007895)}
 .room-set-list li>span>.room-set-purpose{color:#3b4350;font-weight:650;overflow-wrap:anywhere}
 .room-set-list li>em{font-size:12px}
 .extra-room-row.just-added{animation:extraRoomIn .45s ease-out}
 @keyframes extraRoomIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
 
 .room-set-cards{display:grid;gap:9px;margin:12px 0;min-width:0}
-.room-set-equal-card{display:grid;gap:7px;min-width:0;padding:13px;border:1px solid color-mix(in srgb,var(--set-room-color,#c81340) 38%,white);border-left:5px solid var(--set-room-color,#c81340);border-radius:11px;background:color-mix(in srgb,var(--set-room-color,#c81340) 7%,white)}
+.room-set-equal-card{display:grid;gap:7px;min-width:0;padding:13px;border:1px solid color-mix(in srgb,var(--set-room-color,#007895) 38%,white);border-left:5px solid var(--set-room-color,#007895);border-radius:11px;background:color-mix(in srgb,var(--set-room-color,#007895) 7%,white)}
 .room-set-equal-heading{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:6px}
 .room-set-equal-heading>span{min-width:0;padding-top:4px;color:#594450;font-size:12px;font-weight:800;overflow-wrap:anywhere}
 .room-set-equal-heading>em{justify-self:end;max-width:100%;white-space:nowrap;font-style:normal;font-size:11px;font-weight:700;padding:4px 8px;border-radius:999px;background:#f1edf0;color:#555}
@@ -53,7 +53,7 @@
 .room-set-equal-heading>em.pending{background:#fff1d6;color:#835000}
 .room-set-equal-heading>em.rejected,.room-set-equal-heading>em.cancelled,.room-set-equal-heading>em.cancelled_by_admin,.room-set-equal-heading>em.cancelled_by_user{background:#fde8eb;color:#a4161a}
 .room-set-equal-building,.room-set-equal-time{display:flex;align-items:center;gap:6px;min-width:0;font-size:13px;line-height:1.4}
-.room-set-equal-building{color:var(--set-room-color,#c81340);font-weight:750}
+.room-set-equal-building{color:var(--set-room-color,#007895);font-weight:750}
 .room-set-equal-building svg,.room-set-equal-time svg{width:16px;height:16px;flex:none}
 .room-set-equal-card>strong{font-size:17px;color:#211d30}
 .room-set-equal-card>button{justify-self:start}

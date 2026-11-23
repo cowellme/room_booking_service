@@ -30,7 +30,6 @@ services:
       TIME_SLOT_MINUTES: ${TIME_SLOT_MINUTES:-30}
       MIN_BOOKING_MINUTES: ${MIN_BOOKING_MINUTES:-30}
       MAX_BOOKING_MINUTES: ${MAX_BOOKING_MINUTES:-840}
-      MAX_BOOKING_DAYS_AHEAD: ${MAX_BOOKING_DAYS_AHEAD:-730}
       LIFECYCLE_WORKER_ENABLED: ${LIFECYCLE_WORKER_ENABLED:-true}
       LIFECYCLE_INTERVAL_SECONDS: ${LIFECYCLE_INTERVAL_SECONDS:-30}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
@@ -73,7 +72,7 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10

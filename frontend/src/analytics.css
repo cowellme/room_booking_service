@@ -1,9 +1,9 @@
 /* Administrator analytics dashboard. Also inlined into the downloaded HTML report,
    so every service variable has a light fallback. */
 .analytics-page {
-    --a-wine: var(--wine, #C81340);
+    --a-wine: var(--wine, #007895);
     --a-surface: var(--surface, #ffffff);
-    --a-soft: var(--surface-soft, #faf8f9);
+    --a-soft: var(--surface-soft, #f3f7fb);
     --a-text: var(--page-text, #1a1a2e);
     --a-muted: var(--page-muted, #6c757d);
     --a-line: var(--theme-line, #e9ecef);
@@ -174,7 +174,7 @@ body.analytics-export .analytics-scroll, body.analytics-export .analytics-hbars 
 .analytics-reasons h3{margin:10px 0 8px;color:var(--a-text)}
 .ranking-switch{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
 .ranking-switch button{padding:6px 8px;border:1px solid var(--a-line);border-radius:7px;background:#fff;color:#535b67;font-size:12px;cursor:pointer}
-.ranking-switch button.active{border-color:#c81340;background:#fff1f5;color:#a20d35;font-weight:700}
+.ranking-switch button.active{border-color:#007895;background:#fff1f5;color:#a20d35;font-weight:700}
 .ranking-table td:first-child small{display:block;margin-top:3px;color:var(--a-muted);font-size:11px}
 .cohort-legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--a-muted);font-size:12px}
 .cohort-legend span:before{content:"";display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}

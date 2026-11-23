@@ -1,5 +1,5 @@
 export const STATUS_LABELS={
-  pending:'Ожидает решения',approved:'Подтверждено',rejected:'Отклонено',cancelled:'Отменено',
+  pending:'Ожидает решения',in_progress:'Принята в работу',approved:'Подтверждено',rejected:'Отклонено',cancelled:'Отменено',
   cancelled_by_user:'Отменено пользователем',cancelled_by_admin:'Отменено администратором',
   completed:'Состоялось',no_show:'Неявка',
   transferred:'Перенесено',

@@ -1,0 +1,151 @@
+
+:root,:root[data-theme="light"]{
+  font-family:Aptos,'Segoe UI',Arial,sans-serif;
+  --vshgu-navy:#272f65;
+  --vshgu-ink:#171e3a;
+  --vshgu-cyan:#017cbf;
+  --vshgu-button-hover:#00699f;
+  --vshgu-button-glow:#017cbf30;
+  --vshgu-action:#017cbf;
+  --vshgu-soft:#e5f6fc;
+  --vshgu-line:#d4e0eb;
+  --wine:var(--vshgu-action);
+  --page-text:var(--vshgu-ink);
+  --page-muted:#536276;
+  --line:var(--vshgu-line);
+  --theme-line:var(--vshgu-line);
+  --surface-soft:#f3f7fb;
+  --page-overlay:rgba(243,247,251,.94);
+}
+
+.calendar-operation-booking:not(.service-block){border-left:0}
+.day-schedule-timeline>article:not(.service-block){--booking-color:var(--vshgu-action)!important}
+.day-schedule-timeline>article:not(.service-block)>div{background:var(--vshgu-soft);border-left:0}
+.day-schedule-timeline>article:not(.service-block)>i{background:#b9ddeb}
+body{color:var(--vshgu-ink);background:#f4f7fa}
+.app-shell{background:transparent}
+.app-shell>nav{background:#fff;border-color:var(--vshgu-line);box-shadow:0 4px 18px #272f650e}
+.app-shell>nav .brand img{width:auto;height:44px;object-fit:contain;flex:none}
+.app-shell>nav .nav-links>button.active{background:var(--vshgu-soft);color:var(--vshgu-navy);border-color:var(--vshgu-cyan)}
+.welcome-screen{background:#f4f7fa}
+.welcome-screen::after,.welcome-screen .welcome-shape{display:none}
+.welcome-card>img{width:clamp(104px,16vw,152px);height:auto;max-height:180px;object-fit:contain}
+.welcome-card h1,.page-heading h1,.rooms-catalog-hero h1,.calendar-intro h1{color:var(--vshgu-ink)}
+.welcome-actions .user-role{background:var(--vshgu-soft);color:#005d76;border-color:#9eddf0}
+.welcome-actions .admin-role{background:var(--vshgu-navy);color:#fff;border-color:var(--vshgu-navy)}
+.rooms-catalog-page{background:#f4f7fa}
+.pv3-hero{background:#272f65}
+.series-modal-banner{background:var(--vshgu-cyan);box-shadow:0 8px 22px var(--vshgu-button-glow)}
+.auth-modal{--field-bg:#f8fcff}
+.calendar-toolbar-v2,.booking-center-heading,.moderation-page .page-heading{border-color:var(--vshgu-line)}
+.rooms-catalog-hero{background:none;border-radius:0}.rooms-catalog-hero>div>small{font-size:14px}.rooms-catalog-page .rooms-catalog-hero h1{font-size:clamp(32px,4vw,42px)}
+.primary{background:var(--vshgu-cyan);border-color:var(--vshgu-cyan);color:#fff}
+.primary:not(:disabled):hover{background:var(--vshgu-button-hover);border-color:var(--vshgu-button-hover);box-shadow:0 0 0 3px var(--vshgu-button-glow)}
+:where(button,a,input,select,textarea,summary):focus-visible{outline:2px solid #0086a3;outline-offset:3px}
+.calendar-operations-head{background:#eaf1f8;border-color:#b6c8dc}
+.calendar-operations-head>b{color:#fff;background:#017cbf}
+.calendar-operations-head>button.today{background:#edf7ef;box-shadow:inset 0 -2px #a5cbb1}
+.calendar-operations-row>div{border-right-color:var(--vshgu-line)}
+.calendar-operations-row>div.today,.admin-calendar-page .calendar-operations-row:hover>div.today:not(:hover){background:#f3faf5}
+.calendar-operation-booking:not(.service-block):not(.calendar-masked-booking){background:var(--vshgu-soft);color:#144965;box-shadow:none}
+.calendar-operation-booking.calendar-masked-booking{background:#dcecfb}
+.room-building-banner{color:#fff}
+.moderation-review .review-approve{background:#218553;border-color:#218553}
+.moderation-review .review-reject{background:#a81839;border-color:#a81839}
+@media(max-width:650px){.app-shell>nav .brand img{height:38px}.welcome-card>img{max-height:130px}}
+
+.calendar-top-booking,.phone-booking-button{box-shadow:0 5px 14px #017cbf26}
+.calendar-top-booking:hover,.phone-booking-button:hover{box-shadow:0 6px 16px #017cbf33}
+.calendar-operation-add{opacity:.8;color:var(--vshgu-action);border-color:#b7cadc;background:#f5f9fd}
+.calendar-operations-row>div:hover .calendar-operation-add,.calendar-operation-add:focus-visible{background:var(--vshgu-action);border-color:var(--vshgu-action)}
+
+.calendar-operations-shell{--calendar-grid-line:#d6dbe1}
+.calendar-operations-shell .calendar-operations-head{border-bottom:1px solid var(--calendar-grid-line)}
+.calendar-operations-shell .calendar-operations-row{border-bottom:1px solid var(--calendar-grid-line);grid-template-rows:minmax(0,1fr);overflow:clip}
+.calendar-operations-shell :is(.calendar-operations-head,.calendar-operations-row)>*{
+  box-sizing:border-box;
+  border-right:1px solid var(--calendar-grid-line);
+  border-radius:0;
+}
+.calendar-operations-shell .calendar-operations-row>*{
+  height:auto;min-height:0;align-self:stretch;
+  max-height:100%;
+  border-bottom:0;
+}
+.service-block.maintenance{--service-color:#c94a43;--service-bg:#ffeded;--service-ink:#842b28}
+.service-block.setup{--service-color:#b94764;--service-bg:#f9e4e9;--service-ink:#772439}
+.service-block.teardown{--service-color:#a42437;--service-bg:#f8dce2;--service-ink:#781c2b}
+.admin-bookings-main .secondary,.user-booking-portal .secondary{background:#edf3f9;border-color:#d6e2ed;color:#29496b}
+.admin-bookings-main .secondary:hover,.user-booking-portal .secondary:hover{background:#e1ebf5;border-color:#b7cadc;color:#203b58}
+.admin-bookings-main .booking-found-number{background:#eaf1f8;color:#29496b}
+.booking-number-search>div:focus-within{border-color:#017cbf;box-shadow:0 0 0 3px #017cbf26}
+
+/* Flat surfaces keep controls and status colors as the main visual accents. */
+.app-shell>nav{box-shadow:none;border-bottom:1px solid var(--vshgu-line)}
+/* Raise the sticky header's stacking context, not just its menu. */
+.app-shell>nav:has(.service-menu){z-index:3000}
+:is(.welcome-card,.catalog-room-card,.admin-booking-card,.request-card,.calendar-operations-shell,.pv3-card,.user-request-form,.room-detail-modal,.moderation-review){box-shadow:none;border-radius:12px}
+.calendar-top-booking,.phone-booking-button,.calendar-top-booking:hover,.phone-booking-button:hover{box-shadow:none}
+.calendar-operations-scroll{background:#fff}
+.rooms-catalog-page{background:#f4f7fa}
+.catalog-room-card:hover{transform:none;box-shadow:none}
+
+.calendar-operations-shell{border:1px solid #d0d5db}
+.admin-calendar-page .calendar-operations-row>div:hover{background:#f2f7fc}
+.admin-calendar-page .calendar-operations-row>div.today:hover{background:#eff8f3}
+.calendar-operations-row>div.selected-cell{box-shadow:inset 0 0 0 1px #7ea3c4}
+.calendar-top-booking:focus-visible,.phone-booking-button:focus-visible{outline-color:var(--vshgu-action)}
+
+.app-shell :is(.primary.calendar-top-booking,.primary.phone-booking-button,.primary.schedule-book-action),.welcome-actions :is(.user-role,.admin-role){
+  background:var(--vshgu-cyan);border-color:var(--vshgu-cyan);color:#fff;box-shadow:none
+}
+.app-shell :is(.primary.calendar-top-booking,.primary.phone-booking-button,.primary.schedule-book-action):not(:disabled):hover,.welcome-actions :is(.user-role,.admin-role):hover{
+  background:var(--vshgu-button-hover);border-color:var(--vshgu-button-hover);color:#fff;box-shadow:0 0 0 3px var(--vshgu-button-glow)
+}
+.calendar-operations-row>div:hover .calendar-operation-add,.calendar-operation-add:focus-visible{
+  background:var(--vshgu-cyan);border-color:var(--vshgu-cyan);color:#fff
+}
+button.primary:focus-visible,.welcome-actions .role-button:focus-visible{outline-color:var(--vshgu-action)}
+.moderation-review .primary.review-approve:not(:disabled):hover{background:#176d42;border-color:#176d42;box-shadow:0 0 0 3px #21855330}
+
+button:is(.primary,.role-button,.calendar-operation-add){
+  --button-shadow:var(--vshgu-cyan);
+}
+button.secondary{--button-shadow:var(--vshgu-action)}
+button:is(.danger,.danger-link,.soft-danger,.review-reject,.booking-card-delete-icon){--button-shadow:#a81839}
+button.review-approve{--button-shadow:#218553}
+button:is(.primary,.secondary,.role-button,.calendar-operation-add,.danger,.danger-link,.soft-danger,.review-reject,.booking-card-delete-icon):not(:disabled),
+.app-shell button:is(.primary.calendar-top-booking,.primary.phone-booking-button,.primary.schedule-book-action):not(:disabled){
+  box-shadow:0 3px 10px color-mix(in srgb,var(--button-shadow) 24%,transparent)
+}
+button:is(.primary,.secondary,.role-button,.calendar-operation-add,.danger,.danger-link,.soft-danger,.review-reject,.booking-card-delete-icon):not(:disabled):hover,
+.app-shell button:is(.primary.calendar-top-booking,.primary.phone-booking-button,.primary.schedule-book-action):not(:disabled):hover{
+  box-shadow:0 5px 13px color-mix(in srgb,var(--button-shadow) 34%,transparent)
+}
+
+/* Neutral calendar corner and an unframed quick room search. */
+.calendar-operations-head>b{
+  color:var(--vshgu-ink);
+  background:#fff;
+}
+.calendar-primary-search .filter-search-wide,
+.calendar-primary-search .filter-search-wide:focus-within{
+  border:1px solid var(--vshgu-line);
+  background:#fff;
+  box-shadow:none;
+}
+.calendar-primary-search .filter-search-wide:focus-within{
+  border-color:var(--vshgu-cyan);
+}
+.welcome-features b{
+  background:var(--vshgu-cyan);
+  color:#fff;
+}
+
+/* Calendar state palette: booking blue, setup red, teardown and maintenance yellow. */
+.calendar-operation-booking:not(.service-block):not(.calendar-masked-booking){background:#dff3fc;color:#124d69}
+.service-block.setup{--service-color:#c94a43;--service-bg:#ffeded;--service-ink:#842b28}
+.service-block.maintenance,.service-block.teardown{--service-color:#c99200;--service-bg:#fff1a8;--service-ink:#604600}
+.calendar-legend .approved{color:#017cbf;background:#e2f4fd}
+.calendar-legend .setup{color:#9e2c2c;background:#ffeded}
+.calendar-legend .maintenance,.calendar-legend .teardown{color:#765800;background:#fff3bd}

@@ -6,11 +6,11 @@
 .attachment-drop button svg,.attachment-add svg{width:16px;height:16px}
 .attachment-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
 .attachment-list li{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line,#e3e3ea);border-radius:10px;background:var(--surface,#fff);min-width:0}
-.attachment-list li>svg{width:18px;height:18px;flex:none;color:var(--wine,#c81340)}
+.attachment-list li>svg{width:18px;height:18px;flex:none;color:var(--wine,#007895)}
 .attachment-list li>span{display:grid;min-width:0;flex:1}
 .attachment-list li>span>b,.attachment-list li>span>a{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--page-text,#1a1a2e)}
 .attachment-list li>span>a{text-decoration:underline;text-underline-offset:2px}
-.attachment-list li>span>a:hover{color:var(--wine,#c81340)}
+.attachment-list li>span>a:hover{color:var(--wine,#007895)}
 .attachment-list li>span>small{font-size:11px;color:var(--muted,#6b6b7b)}
 .attachment-list .icon{display:inline-grid;place-items:center;width:30px;height:30px;flex:none;border:0;border-radius:8px;background:transparent;color:var(--muted,#6b6b7b);cursor:pointer}
 .attachment-list .icon:hover{background:rgba(0,0,0,.06);color:var(--page-text,#1a1a2e)}
@@ -18,9 +18,16 @@
 .attachment-box{display:grid;gap:8px;margin-top:12px}
 .attachment-box h4{display:flex;align-items:center;gap:6px;margin:0;font-size:13px;font-weight:800}
 .attachment-box h4 svg{width:15px;height:15px}
-.attachment-box h4 b{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--wine,#c81340);color:#fff;font-size:11px}
+.attachment-box h4 b{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--wine,#007895);color:#fff;font-size:11px}
 .attachment-box.compact{margin-top:10px}
 .attachment-box.compact .attachment-list li{padding:6px 8px}
+.attachment-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,190px));align-items:stretch;gap:10px}
+.attachment-gallery li{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-content:start;gap:5px 4px;padding:7px}
+.attachment-gallery li>.attachment-preview{grid-column:1/-1;display:grid;place-items:center;width:100%;height:150px;overflow:hidden;box-sizing:border-box;border:1px solid #d9e1e7;border-radius:7px;background:#eef1f3;text-decoration:none}
+.attachment-gallery li>.attachment-preview img,.attachment-gallery li>.attachment-preview iframe{display:block;width:100%;height:100%;border:0;background:#fff;object-fit:contain;pointer-events:none}
+.attachment-gallery li>.attachment-preview.fallback svg{width:42px;height:42px;color:#678296}
+.attachment-gallery li>span:not(.attachment-preview){grid-column:1/-1}.attachment-gallery li>.icon{align-self:center}.attachment-gallery li>.secondary{grid-column:1/-1}
+.attachment-box.compact .attachment-gallery{grid-template-columns:repeat(auto-fill,minmax(130px,170px))}.attachment-box.compact .attachment-gallery li>.attachment-preview{height:125px}
 .attachment-add{justify-self:start}
 .attachment-empty{margin:0;font-size:12px;color:var(--muted,#6b6b7b)}
 .attachment-error{margin:0;font-size:12px;color:#b42318}

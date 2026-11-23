@@ -2,7 +2,7 @@
 .room-set-main-label{display:block;margin:8px 0 5px;color:#667085;font-size:11px;font-weight:800;letter-spacing:.04em}
 .room-set-expand{margin:10px 0;border:1px solid #d9e6ef;border-radius:10px;background:#f7fbfe}
 .room-set-expand>summary{padding:10px 12px;color:#255b79;font-size:13px;font-weight:800;cursor:pointer}
-.room-set-expand>summary b{margin-left:5px;color:#a81039}
+.room-set-expand>summary b{margin-left:5px;color:#005d76}
 .room-set-expand>.room-set-list{margin:0;padding:0 10px 10px}
 .room-set-expand>.room-set-list h4{display:none}
 .calendar-operation-booking .calendar-set-marker{color:#8b1234;font-size:11px;font-weight:900}
